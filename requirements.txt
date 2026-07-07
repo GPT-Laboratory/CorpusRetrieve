@@ -1,0 +1,11 @@
+# Core (PDF is the heavy path; PyMuPDF is primary, pdfplumber is the fallback backend)
+pymupdf>=1.24
+pdfplumber>=0.11
+python-docx>=1.1
+openpyxl>=3.1
+pandas>=2.0
+pillow>=10.0
+pytesseract>=0.3.10      # requires the system `tesseract` binary
+langdetect>=1.0.9
+beautifulsoup4>=4.12
+# System deps (not pip): tesseract-ocr (+ language packs, e.g. tesseract-ocr-fin for Finnish)
