@@ -6,8 +6,9 @@ import tempfile
 import zipfile
 from pathlib import Path
 
-from docparse.base import get_extractor
+from docparse.router import get_extractor
 from docparse.detect import detect_type
+from docparse.postprocess import finalize
 from docparse.models import ExtractionConfig, ExtractionResult
 
 _SKIP = ("__MACOSX", ".DS_Store")
@@ -27,7 +28,7 @@ def extract(path: str, config: ExtractionConfig | None = None) -> ExtractionResu
             return r
     result = extractor.extract(path, cfg)
     result.mime = result.mime or mime
-    return result
+    return finalize(result, cfg)
 
 
 def extract_zip(path: str, config: ExtractionConfig | None = None,

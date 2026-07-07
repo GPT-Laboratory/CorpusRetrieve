@@ -6,6 +6,8 @@ openpyxl>=3.1
 pandas>=2.0
 pillow>=10.0
 pytesseract>=0.3.10      # requires the system `tesseract` binary
+charset-normalizer>=3.0      # optional but recommended: better input-encoding detection
 langdetect>=1.0.9
 beautifulsoup4>=4.12
 # System deps (not pip): tesseract-ocr (+ language packs, e.g. tesseract-ocr-fin for Finnish)
+lingua-language-detector>=2.0   # optional: much better language detection than langdetect

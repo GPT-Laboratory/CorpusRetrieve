@@ -25,6 +25,7 @@ htmlcov/
 
 # ---- docparse output (generated, not source) ----
 report.json
+results.json
 *.out.json
 assets/            # page/figure images from --assets
 out/

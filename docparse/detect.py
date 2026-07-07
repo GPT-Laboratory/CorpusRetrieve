@@ -12,7 +12,7 @@ _EXT_TO_TYPE = {
     ".csv": "csv", ".tsv": "csv",
     ".html": "html", ".htm": "html",
     ".txt": "text", ".md": "text", ".log": "text",
-    ".json": "text",
+    ".json": "json", ".jsonl": "json",
     ".png": "image", ".jpg": "image", ".jpeg": "image", ".webp": "image",
     ".gif": "image", ".tif": "image", ".tiff": "image", ".bmp": "image",
 }

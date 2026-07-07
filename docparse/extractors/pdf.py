@@ -1,19 +1,25 @@
-"""PDF extraction. Primary backend PyMuPDF (text+tables+images+render), pdfplumber fallback.
+"""PDF extraction. Primary backend PyMuPDF, structure-preserving pdfplumber fallback.
 
-Per page it produces reading-order elements: headings, narrative blocks, tables (markdown),
-figures (bbox + linked caption), and — for scanned pages or on request — page-image rasters
-with OCR text. Everything is provenance-bearing (page + bbox) and confidence-tagged.
+Per page, in column-aware reading order (recursive XY-cut):
+  headings (with levels from font-size clusters), narrative, tables (markdown text
+  + structured header/rows view + optional crop), figures (bbox + optional crop)
+  with captions linked to the nearest figure OR table above/below, and — for
+  scanned pages — preprocessed, orientation-corrected OCR with per-line bboxes.
+
+Running headers/footers/page numbers are detected by cross-page repetition and
+suppressed (kind page_header/page_footer, dropped unless configured otherwise).
 """
 from __future__ import annotations
 
 import io
 import os
 import re
+from collections import Counter
 from statistics import median
 
-from docparse.base import register
-from docparse.lang import detect_language
+from docparse.router import register
 from docparse.models import Element, ExtractionConfig, ExtractionResult
+from docparse.serialize import serialize_table
 
 try:
     import fitz  # PyMuPDF
@@ -22,35 +28,165 @@ except Exception:
     _HAS_FITZ = False
 
 
+# --------------------------------------------------------------------------- helpers
+
 def _center_in(bbox, box) -> bool:
     cx, cy = (bbox[0] + bbox[2]) / 2, (bbox[1] + bbox[3]) / 2
     return box[0] <= cx <= box[2] and box[1] <= cy <= box[3]
 
 
-def _ocr(png_bytes: bytes, langs: str) -> tuple[str, float]:
+def _norm_boiler(text: str) -> str:
+    """Normalize a block for repetition matching: page numbers vary, the rest doesn't."""
+    t = re.sub(r"\d+", "#", text.strip().lower())
+    return re.sub(r"\s+", " ", t)
+
+
+def _vertical_gap(caption_bbox, target_bbox) -> float:
+    """Distance between a caption and a figure/table, valid above OR below."""
+    below = caption_bbox[1] - target_bbox[3]   # caption under the target
+    above = target_bbox[1] - caption_bbox[3]   # caption over the target
+    gaps = [g for g in (below, above) if g >= -5]  # small overlap tolerated
+    return min(gaps) if gaps else 1e9
+
+
+def _xy_cut(items: list[tuple[list[float], object]], min_gap: float = 14.0) -> list[object]:
+    """Recursive XY-cut reading order. items = [(bbox, payload)].
+
+    Splits on the widest horizontal whitespace gap first (columns, left→right),
+    then vertical gaps (top→bottom); falls back to (y, x) sort at the leaves.
+    """
+    if len(items) <= 1:
+        return [p for _, p in items]
+
+    def best_gap(axis: int) -> tuple[float, float] | None:
+        lo, hi = axis, axis + 2
+        ivs = sorted((b[lo], b[hi]) for b, _ in items)
+        merged = [list(ivs[0])]
+        for s, e in ivs[1:]:
+            if s <= merged[-1][1] + 1:
+                merged[-1][1] = max(merged[-1][1], e)
+            else:
+                merged.append([s, e])
+        best = None
+        for (a0, a1), (b0, _) in zip(merged, merged[1:]):
+            gap = b0 - a1
+            if gap >= min_gap and (best is None or gap > best[0]):
+                best = (gap, (a1 + b0) / 2)
+        return best
+
+    for axis in (0, 1):  # x first: columns beat bands
+        g = best_gap(axis)
+        if g:
+            cut = g[1]
+            lo_items = [(b, p) for b, p in items if (b[axis] + b[axis + 2]) / 2 < cut]
+            hi_items = [(b, p) for b, p in items if (b[axis] + b[axis + 2]) / 2 >= cut]
+            if lo_items and hi_items:
+                return _xy_cut(lo_items, min_gap) + _xy_cut(hi_items, min_gap)
+    return [p for _, p in sorted(items, key=lambda it: (round(it[0][1] / 3), it[0][0]))]
+
+
+def _heading_levels(all_sizes: list[float], med: float, ratio: float) -> dict[float, int]:
+    """Cluster distinct 'large' font sizes into heading levels 1..3."""
+    big = sorted({round(s, 1) for s in all_sizes if med and s >= med * ratio}, reverse=True)
+    return {s: min(i + 1, 3) for i, s in enumerate(big)}
+
+
+# --------------------------------------------------------------------------- OCR
+
+def _preprocess(img, cfg: ExtractionConfig):
+    from PIL import ImageOps
+    if not cfg.ocr_preprocess:
+        return img
+    g = ImageOps.autocontrast(img.convert("L"))
+    return g
+
+
+def _auto_orient(img, result: ExtractionResult, cfg: ExtractionConfig):
+    if not cfg.ocr_auto_orient:
+        return img
+    try:
+        import pytesseract
+        osd = pytesseract.image_to_osd(img)
+        m = re.search(r"Rotate:\s*(\d+)", osd)
+        rot = int(m.group(1)) if m else 0
+        s = re.search(r"Script:\s*(\w+)", osd)
+        if s:
+            result.stats.setdefault("ocr_scripts", []).append(s.group(1))
+        if rot:
+            return img.rotate(-rot, expand=True)
+    except Exception:
+        pass
+    return img
+
+
+def _ocr_lines(png_bytes: bytes, cfg: ExtractionConfig, result: ExtractionResult,
+               scale: float) -> list[tuple[str, float | None, list[float]]]:
+    """OCR a page raster -> [(line_text, confidence, bbox_in_source_coords)]."""
     try:
         import pytesseract
         from PIL import Image
         img = Image.open(io.BytesIO(png_bytes))
+        img = _auto_orient(img, result, cfg)
+        img = _preprocess(img, cfg)
         try:
-            data = pytesseract.image_to_data(img, lang=langs, output_type=pytesseract.Output.DICT)
+            data = pytesseract.image_to_data(img, lang=cfg.ocr_langs,
+                                             output_type=pytesseract.Output.DICT)
         except Exception:
-            data = pytesseract.image_to_data(img, lang="eng", output_type=pytesseract.Output.DICT)
-        words, confs = [], []
-        for w, c in zip(data.get("text", []), data.get("conf", [])):
-            if w and w.strip():
-                words.append(w)
-                try:
-                    ci = float(c)
-                    if ci >= 0:
-                        confs.append(ci)
-                except ValueError:
-                    pass
-        text = " ".join(words)
-        conf = round(sum(confs) / len(confs) / 100.0, 3) if confs else None
-        return text, conf
-    except Exception:
-        return "", None
+            data = pytesseract.image_to_data(img, lang="eng",
+                                             output_type=pytesseract.Output.DICT)
+        lines: dict[tuple, dict] = {}
+        n = len(data.get("text", []))
+        for i in range(n):
+            w = (data["text"][i] or "").strip()
+            if not w:
+                continue
+            key = (data["block_num"][i], data["par_num"][i], data["line_num"][i])
+            box = [data["left"][i], data["top"][i],
+                   data["left"][i] + data["width"][i], data["top"][i] + data["height"][i]]
+            ln = lines.setdefault(key, {"words": [], "confs": [], "bbox": box})
+            ln["words"].append(w)
+            ln["bbox"] = [min(ln["bbox"][0], box[0]), min(ln["bbox"][1], box[1]),
+                          max(ln["bbox"][2], box[2]), max(ln["bbox"][3], box[3])]
+            try:
+                c = float(data["conf"][i])
+                if c >= 0:
+                    ln["confs"].append(c)
+            except (ValueError, TypeError):
+                pass
+        out = []
+        for key in sorted(lines):
+            ln = lines[key]
+            conf = round(sum(ln["confs"]) / len(ln["confs"]) / 100.0, 3) if ln["confs"] else None
+            bbox = [round(v * scale, 2) for v in ln["bbox"]]
+            out.append((" ".join(ln["words"]), conf, bbox))
+        return out
+    except Exception as exc:
+        result.warnings.append(f"OCR failed: {exc}")
+        return []
+
+
+# --------------------------------------------------------------------------- PyMuPDF
+
+def _collect_boilerplate(doc, cfg: ExtractionConfig) -> set[str]:
+    """Cheap first pass: normalized top/bottom-zone blocks repeated across pages."""
+    if not cfg.remove_boilerplate or doc.page_count < cfg.boilerplate_min_pages:
+        return set()
+    counter: Counter[str] = Counter()
+    n = doc.page_count if cfg.max_pages is None else min(doc.page_count, cfg.max_pages)
+    for pno in range(n):
+        page = doc[pno]
+        h = page.rect.height
+        top, bot = h * cfg.boilerplate_zone, h * (1 - cfg.boilerplate_zone)
+        seen_on_page = set()
+        for x0, y0, x1, y1, text, *_ in page.get_text("blocks"):
+            text = text.strip()
+            if not text or len(text) > 120:
+                continue
+            if y1 <= top or y0 >= bot:
+                seen_on_page.add(_norm_boiler(text))
+        counter.update(seen_on_page)
+    threshold = max(cfg.boilerplate_min_pages, int(n * cfg.boilerplate_min_ratio))
+    return {t for t, c in counter.items() if c >= threshold}
 
 
 def _pymupdf_extract(path: str, cfg: ExtractionConfig, result: ExtractionResult) -> None:
@@ -58,42 +194,62 @@ def _pymupdf_extract(path: str, cfg: ExtractionConfig, result: ExtractionResult)
     result.page_count = doc.page_count
     caption_re = re.compile(cfg.caption_regex, re.IGNORECASE)
     order = 0
-    doc_text_sample: list[str] = []
     assets = cfg.assets_dir
     if assets:
         os.makedirs(assets, exist_ok=True)
+
+    boiler = _collect_boilerplate(doc, cfg)
+    result.stats["boilerplate_patterns"] = len(boiler)
+    scale = 72.0 / cfg.image_dpi  # raster px -> PDF points
 
     n_pages = doc.page_count if cfg.max_pages is None else min(doc.page_count, cfg.max_pages)
     for pno in range(n_pages):
         page = doc[pno]
         pd = page.get_text("dict")
         raw_text = page.get_text("text")
+        page_h = page.rect.height
 
-        # --- scanned page? OCR fallback ---
         is_scanned = len(raw_text.strip()) < cfg.ocr_min_chars
         do_ocr = cfg.ocr == "on" or (cfg.ocr == "auto" and is_scanned)
 
-        # --- tables first (so we can suppress their text blocks) ---
-        table_boxes = []
+        # --- tables first (their text blocks get suppressed) ---
+        table_boxes: list[list[float]] = []
+        table_els: list[Element] = []
         if cfg.extract_tables:
             try:
-                for t in page.find_tables().tables:
-                    md = t.to_markdown()
+                for ti, t in enumerate(page.find_tables().tables):
+                    rows = t.extract()
                     bbox = list(t.bbox)
                     table_boxes.append(bbox)
-                    order += 1
-                    result.elements.append(Element(
-                        kind="table", text=md.strip(), page=pno + 1, bbox=bbox,
-                        order=order, extractor="pymupdf",
-                        metadata={"rows": getattr(t, "row_count", None), "cols": getattr(t, "col_count", None)}))
+                    text, extras, structured, trunc = serialize_table(
+                        rows, cfg.table_serializations, cfg.table_max_rows)
+                    visual = {"page": pno + 1, "bbox": bbox}
+                    if assets:
+                        try:
+                            crop = page.get_pixmap(clip=fitz.Rect(bbox), dpi=cfg.image_dpi)
+                            fp = os.path.join(assets, f"p{pno + 1}_table{ti}.png")
+                            crop.save(fp)
+                            visual["image_path"] = fp
+                        except Exception:
+                            pass
+                    meta = {"rows": getattr(t, "row_count", None),
+                            "cols": getattr(t, "col_count", None), "truncated": trunc}
+                    if extras:
+                        meta["serializations"] = extras
+                    table_els.append(Element(
+                        kind="table", text=text, page=pno + 1, bbox=bbox,
+                        extractor="pymupdf", structured=structured,
+                        visual_ref=visual, metadata=meta))
             except Exception as exc:
                 result.warnings.append(f"table extraction failed on page {pno + 1}: {exc}")
 
-        # --- text blocks (skip those inside tables) ---
+        # --- text blocks (skip table interiors and boilerplate) ---
         sizes = [s["size"] for b in pd["blocks"] if b.get("type") == 0
                  for ln in b.get("lines", []) for s in ln.get("spans", [])]
         med = median(sizes) if sizes else 0.0
-        items = []  # (y0, x0, Element)
+        levels = _heading_levels(sizes, med, cfg.heading_size_ratio)
+
+        text_els: list[Element] = []
         for b in pd["blocks"]:
             if b.get("type") != 0:
                 continue
@@ -101,25 +257,35 @@ def _pymupdf_extract(path: str, cfg: ExtractionConfig, result: ExtractionResult)
             if any(_center_in(bbox, tb) for tb in table_boxes):
                 continue
             spans = [s for ln in b.get("lines", []) for s in ln.get("spans", [])]
-            line_texts = []
-            for ln in b.get("lines", []):
-                lt = "".join(s["text"] for s in ln.get("spans", []))
-                if lt.strip():
-                    line_texts.append(lt.strip())
+            line_texts = [lt for ln in b.get("lines", [])
+                          if (lt := "".join(s["text"] for s in ln.get("spans", [])).strip())]
             btext = " ".join(line_texts).strip()
             if not btext:
                 continue
-            max_size = max((s["size"] for s in spans), default=0.0)
-            kind = "heading" if med and max_size >= med * cfg.heading_size_ratio and len(btext) < 200 else "narrative"
+
+            if boiler and _norm_boiler(btext) in boiler:
+                zone = "page_header" if bbox[3] <= page_h * cfg.boilerplate_zone else "page_footer"
+                result.stats["boilerplate_removed"] = result.stats.get("boilerplate_removed", 0) + 1
+                if cfg.parameters.get("keep_boilerplate"):
+                    text_els.append(Element(kind=zone, text=btext, page=pno + 1,
+                                            bbox=bbox, extractor="pymupdf"))
+                continue
+
+            max_size = round(max((s["size"] for s in spans), default=0.0), 1)
+            bold = any(s.get("flags", 0) & 16 for s in spans)  # bit 4 = bold
+            kind, level = "narrative", None
+            if med and len(btext) < 200:
+                if max_size in levels:
+                    kind, level = "heading", levels[max_size]
+                elif bold and max_size >= med and len(btext) < 90 and not btext.endswith("."):
+                    kind, level = "heading", (levels.get(max_size) or 3)
             if caption_re.match(btext):
-                kind = "caption"
-            items.append((bbox[1], bbox[0], Element(
-                kind=kind, text=btext, page=pno + 1, bbox=bbox, extractor="pymupdf")))
-            if len(doc_text_sample) < 40 and kind == "narrative":
-                doc_text_sample.append(btext)
+                kind, level = "caption", None
+            text_els.append(Element(kind=kind, text=btext, page=pno + 1, bbox=bbox,
+                                    level=level, extractor="pymupdf"))
 
         # --- figures / images ---
-        fig_items = []
+        fig_els: list[Element] = []
         if cfg.extract_figures:
             seen = set()
             for img in page.get_images(full=True):
@@ -132,43 +298,44 @@ def _pymupdf_extract(path: str, cfg: ExtractionConfig, result: ExtractionResult)
                 except Exception:
                     rects = []
                 for r in rects:
-                    bbox = [r.x0, r.y0, r.x1, r.y1]
                     if (r.x1 - r.x0) * (r.y1 - r.y0) < 2500:  # skip tiny logos/rules
                         continue
-                    meta = {"xref": xref}
+                    bbox = [r.x0, r.y0, r.x1, r.y1]
+                    visual = {"page": pno + 1, "bbox": bbox, "xref": xref}
                     if assets:
                         try:
                             crop = page.get_pixmap(clip=r, dpi=cfg.image_dpi)
                             fp = os.path.join(assets, f"p{pno + 1}_fig{xref}.png")
                             crop.save(fp)
-                            meta["image_path"] = fp
+                            visual["image_path"] = fp
                         except Exception:
                             pass
-                    fig_items.append((bbox[1], bbox[0], Element(
-                        kind="figure", text="", page=pno + 1, bbox=bbox, extractor="pymupdf", metadata=meta)))
+                    fig_els.append(Element(kind="figure", text="", page=pno + 1, bbox=bbox,
+                                           extractor="pymupdf", visual_ref=visual))
 
-        # --- merge into reading order (top-to-bottom, left-to-right) ---
-        page_items = sorted(items + fig_items, key=lambda it: (round(it[0] / 3), it[1]))
-        emitted_by_order = {}
-        for _, _, el in page_items:
+        # --- column-aware reading order over everything on the page ---
+        page_items = [(el.bbox, el) for el in text_els + table_els + fig_els if el.bbox]
+        ordered = (_xy_cut(page_items) if cfg.column_aware
+                   else [el for _, el in sorted(page_items,
+                                                key=lambda it: (round(it[0][1] / 3), it[0][0]))])
+        for el in ordered:
             order += 1
             el.order = order
             result.elements.append(el)
-            emitted_by_order[order] = el
 
-        # link captions to nearest figure above/below
-        figs = [el for _, _, el in fig_items]
-        for el in result.elements:
-            if el.kind == "caption" and el.page == pno + 1 and el.bbox:
-                best, bestd = None, 1e9
-                for f in figs:
-                    if not f.bbox:
-                        continue
-                    d = abs(el.bbox[1] - f.bbox[3])
+        # --- link captions to nearest figure OR table (above or below) ---
+        if cfg.link_captions:
+            targets = fig_els + table_els
+            for el in ordered:
+                if el.kind != "caption" or not el.bbox:
+                    continue
+                best, bestd = None, cfg.caption_max_gap
+                for tgt in targets:
+                    d = _vertical_gap(el.bbox, tgt.bbox)
                     if d < bestd:
-                        best, bestd = f, d
-                if best is not None and bestd < 80:
-                    el.parent_id = best.order
+                        best, bestd = tgt, d
+                if best is not None:
+                    el.parent_id = best.id
 
         # --- OCR / page image ---
         if do_ocr or cfg.emit_page_images:
@@ -180,54 +347,122 @@ def _pymupdf_extract(path: str, cfg: ExtractionConfig, result: ExtractionResult)
                 with open(img_path, "wb") as fh:
                     fh.write(png)
             if do_ocr:
-                text, conf = _ocr(png, cfg.ocr_langs)
-                if text.strip():
+                lines = _ocr_lines(png, cfg, result, scale)
+                if cfg.ocr_line_elements:
+                    for text, conf, bbox in lines:
+                        order += 1
+                        result.elements.append(Element(
+                            kind="narrative", text=text, page=pno + 1, order=order,
+                            bbox=bbox, confidence=conf, extractor="tesseract",
+                            metadata={"ocr": True, "langs": cfg.ocr_langs}))
+                elif lines:
+                    confs = [c for _, c, _ in lines if c is not None]
                     order += 1
                     result.elements.append(Element(
-                        kind="narrative", text=text, page=pno + 1, order=order,
-                        confidence=conf, extractor="tesseract",
-                        metadata={"ocr": True, "langs": cfg.ocr_langs, **({"image_path": img_path} if img_path else {})}))
-                    if len(doc_text_sample) < 40:
-                        doc_text_sample.append(text)
+                        kind="narrative", text=" ".join(t for t, _, _ in lines),
+                        page=pno + 1, order=order,
+                        confidence=round(sum(confs) / len(confs), 3) if confs else None,
+                        extractor="tesseract", metadata={"ocr": True, "langs": cfg.ocr_langs}))
             if cfg.emit_page_images:
                 order += 1
                 result.elements.append(Element(
                     kind="page_image", text="", page=pno + 1, order=order, extractor="pymupdf",
-                    metadata={"dpi": cfg.image_dpi, **({"image_path": img_path} if img_path else {})}))
+                    visual_ref={"page": pno + 1, "dpi": cfg.image_dpi,
+                                **({"image_path": img_path} if img_path else {})}))
 
     doc.close()
-    if cfg.detect_language:
-        lang = detect_language(" ".join(doc_text_sample))
-        result.language = lang
-        for el in result.elements:
-            if el.text and el.language is None:
-                el.language = lang
 
+
+# --------------------------------------------------------------------------- pdfplumber
 
 def _pdfplumber_extract(path: str, cfg: ExtractionConfig, result: ExtractionResult) -> None:
+    """Fallback that keeps the contract: headings (font-size), bboxes, structured tables."""
     import pdfplumber
     order = 0
-    sample: list[str] = []
     with pdfplumber.open(path) as pdf:
         result.page_count = len(pdf.pages)
+        caption_re = re.compile(cfg.caption_regex, re.IGNORECASE)
         n = len(pdf.pages) if cfg.max_pages is None else min(len(pdf.pages), cfg.max_pages)
         for pno in range(n):
             page = pdf.pages[pno]
+            table_boxes: list[list[float]] = []
+            table_els: list[Element] = []
             if cfg.extract_tables:
-                for tbl in page.extract_tables() or []:
-                    rows = ["| " + " | ".join((c or "").replace("\n", " ") for c in row) + " |" for row in tbl]
-                    order += 1
-                    result.elements.append(Element(kind="table", text="\n".join(rows), page=pno + 1,
-                                                    order=order, extractor="pdfplumber"))
-            text = page.extract_text() or ""
-            if text.strip():
+                try:
+                    for ti, t in enumerate(page.find_tables()):
+                        rows = t.extract()
+                        bbox = list(t.bbox)
+                        table_boxes.append(bbox)
+                        text, extras, structured, trunc = serialize_table(
+                            rows, cfg.table_serializations, cfg.table_max_rows)
+                        meta = {"rows": len(rows), "truncated": trunc}
+                        if extras:
+                            meta["serializations"] = extras
+                        table_els.append(Element(
+                            kind="table", text=text, page=pno + 1, bbox=bbox,
+                            extractor="pdfplumber", structured=structured,
+                            visual_ref={"page": pno + 1, "bbox": bbox}, metadata=meta))
+                except Exception as exc:
+                    result.warnings.append(f"table extraction failed on page {pno + 1}: {exc}")
+
+            # lines with font sizes -> paragraph blocks
+            try:
+                lines = page.extract_text_lines() or []
+            except Exception:
+                lines = []
+            sizes = [c.get("size", 0.0) for ln in lines for c in ln.get("chars", [])]
+            med = median(sizes) if sizes else 0.0
+            levels = _heading_levels(sizes, med, cfg.heading_size_ratio)
+
+            blocks: list[dict] = []
+            for ln in sorted(lines, key=lambda l: (l["top"], l["x0"])):
+                bbox = [ln["x0"], ln["top"], ln["x1"], ln["bottom"]]
+                if any(_center_in(bbox, tb) for tb in table_boxes):
+                    continue
+                lsize = round(max((c.get("size", 0.0) for c in ln.get("chars", [])), default=0.0), 1)
+                text = (ln.get("text") or "").strip()
+                if not text:
+                    continue
+                prev = blocks[-1] if blocks else None
+                gap = bbox[1] - prev["bbox"][3] if prev else 1e9
+                same_kind = prev is not None and prev["size"] == lsize
+                if prev and same_kind and gap < max(4.0, lsize * 0.9):
+                    prev["text"] += " " + text
+                    prev["bbox"] = [min(prev["bbox"][0], bbox[0]), prev["bbox"][1],
+                                    max(prev["bbox"][2], bbox[2]), bbox[3]]
+                else:
+                    blocks.append({"text": text, "bbox": bbox, "size": lsize})
+
+            text_els: list[Element] = []
+            for b in blocks:
+                kind, level = "narrative", None
+                if b["size"] in levels and len(b["text"]) < 200:
+                    kind, level = "heading", levels[b["size"]]
+                if caption_re.match(b["text"]):
+                    kind, level = "caption", None
+                text_els.append(Element(kind=kind, text=b["text"], page=pno + 1,
+                                        bbox=b["bbox"], level=level, extractor="pdfplumber"))
+
+            page_items = [(el.bbox, el) for el in text_els + table_els if el.bbox]
+            ordered = (_xy_cut(page_items) if cfg.column_aware
+                       else [el for _, el in sorted(page_items,
+                                                    key=lambda it: (round(it[0][1] / 3), it[0][0]))])
+            for el in ordered:
                 order += 1
-                result.elements.append(Element(kind="narrative", text=text, page=pno + 1,
-                                                order=order, extractor="pdfplumber"))
-                if len(sample) < 40:
-                    sample.append(text)
-    if cfg.detect_language:
-        result.language = detect_language(" ".join(sample))
+                el.order = order
+                result.elements.append(el)
+
+            if cfg.link_captions:
+                for el in ordered:
+                    if el.kind != "caption" or not el.bbox:
+                        continue
+                    best, bestd = None, cfg.caption_max_gap
+                    for tgt in table_els:
+                        d = _vertical_gap(el.bbox, tgt.bbox)
+                        if d < bestd:
+                            best, bestd = tgt, d
+                    if best is not None:
+                        el.parent_id = best.id
 
 
 class PdfExtractor:

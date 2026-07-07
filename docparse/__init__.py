@@ -13,7 +13,7 @@ HTML, plain text/markdown, and images (OCR). Register your own backend via docpa
 from __future__ import annotations
 
 from docparse import extractors as _extractors  # noqa: F401  (registers built-ins on import)
-from docparse.base import get_extractor, register, register_fn, registered_types
+from docparse.router import get_extractor, register, register_fn, registered_types
 from docparse.models import Element, ExtractionConfig, ExtractionResult
 from docparse.pipeline import extract, extract_path, extract_zip
 
