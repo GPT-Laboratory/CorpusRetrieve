@@ -18,7 +18,22 @@ def _build_config(args) -> ExtractionConfig:
         remove_boilerplate=not args.keep_boilerplate,
         column_aware=not args.no_columns,
         per_element_language=args.per_element_language,
+        scientific=not args.no_scientific,
+        table_fallback=args.table_fallback,
     )
+
+
+def _maybe_describe(result, args):
+    if not args.describe_figures:
+        return
+    from docparse.enrich import describe_figures, make_anthropic_describer
+    try:
+        n = describe_figures(result, make_anthropic_describer(model=args.vlm_model),
+                             kinds=("figure", "page_image"))
+        print(f"[vlm] {result.source}: {n} figure(s) described", file=sys.stderr)
+    except Exception as exc:
+        print(f"[vlm] skipped ({exc}) — is ANTHROPIC_API_KEY set and 'anthropic' installed?",
+              file=sys.stderr)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -41,6 +56,14 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--no-columns", action="store_true",
                     help="disable XY-cut column-aware reading order")
     ap.add_argument("--per-element-language", action="store_true")
+    ap.add_argument("--no-scientific", action="store_true",
+                    help="disable scientific enrichment (dehyphenation, roles, citations, claims)")
+    ap.add_argument("--table-fallback", default="text", choices=["text", "none"],
+                    help="caption-anchored detection for unruled tables (default: text)")
+    ap.add_argument("--describe-figures", action="store_true",
+                    help="describe figure crops panel-by-panel with a VLM "
+                         "(needs ANTHROPIC_API_KEY and 'pip install anthropic'; implies --assets)")
+    ap.add_argument("--vlm-model", default="claude-sonnet-4-6")
     args = ap.parse_args(argv)
 
     # Make console output UTF-8 regardless of the OS default code page (fixes Windows cp1252).
@@ -50,10 +73,14 @@ def main(argv: list[str] | None = None) -> int:
         except Exception:
             pass
 
+    if args.describe_figures and not args.assets:
+        args.assets = "assets"                    # crops must exist on disk for the VLM
     cfg = _build_config(args)
     all_results = []
     for path in args.paths:
         all_results.extend(extract_path(path, cfg))
+    for r in all_results:
+        _maybe_describe(r, args)
 
     if args.json:
         payload = json.dumps([r.to_dict() for r in all_results], ensure_ascii=False, indent=2)

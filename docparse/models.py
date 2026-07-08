@@ -130,6 +130,32 @@ class ExtractionConfig:
     # reading order
     column_aware: bool = True                # recursive XY-cut instead of naive y,x sort
 
+    # vector figures: cluster vector drawings (charts/maps/diagrams drawn as paths,
+    # invisible to raster-image detection) into figure regions with crops
+    vector_figures: bool = True
+    vector_figure_min_area: float = 20000.0   # pt² — ignore rules/ornaments
+    vector_figure_min_dim: float = 60.0       # pt  — ignore thin separators
+    figure_max_text_coverage: float = 0.25    # region mostly covered by text = a text box, not a figure
+
+    # publisher/license noise — a DATA list, not logic; extend per corpus
+    noise_patterns: tuple[str, ...] = (
+        r"wiley online library", r"terms and conditions", r"onlinelibrary\.wiley\.com",
+        r"downloaded (?:from|by)", r"creative ?commons licen[cs]e", r"creativecommons\.org",
+        r"rules of use.*oa articles", r"governed by the applicable", r"see the terms",
+        r"all rights reserved", r"authorized licensed use",          # IEEE
+        r"content may change prior to final publication",            # IEEE early access
+        r"springer(?:link)? (?:nature|terms)", r"elsevier (?:b\.v\.|ltd|inc)",
+        r"provided by .{0,40}repository", r"^\s*\d{7,},?\s*(19|20)\d{2}",
+    )
+
+    # unruled tables: caption-anchored text-strategy detection when ruled detection finds none
+    table_fallback: str = "text"             # "text" | "none"
+    table_caption_regex: str = r"^\s*tab(?:le|ell|ulukko)\s*\d"
+
+    # scientific-document enrichment (dehyphenation, license-noise removal, equations,
+    # roles, paper metadata, citation graph, quantities/claims) — see docparse.scientific
+    scientific: bool = True
+
     # captions
     link_captions: bool = True
     caption_max_gap: float = 80.0            # max pt distance between caption and figure/table

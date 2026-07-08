@@ -91,6 +91,131 @@ def _heading_levels(all_sizes: list[float], med: float, ratio: float) -> dict[fl
     return {s: min(i + 1, 3) for i, s in enumerate(big)}
 
 
+
+
+_SOFT_CELL = str.maketrans({"\u00ad": "", "\u202f": " ", "\u00a0": " ",
+                            "\u2010": "-", "\u2011": "-"})
+_IDX_CELL = re.compile(r"^\d{1,3}[.)]?$")
+
+
+def _clean_text_grid(rows, row_bboxes):
+    """Filter a text-strategy grid: drop margin-junk rows, empty columns, prose tails.
+
+    Returns (rows, bbox) or (None, None) if what remains does not look like a table.
+    """
+    if not rows:
+        return None, None
+    width = max(len(r) for r in rows)
+    keep_idx, kept = [], []
+    for i, r in enumerate(rows):
+        cells = [("" if c is None else str(c).translate(_SOFT_CELL).strip()) for c in r] \
+            + [""] * (width - len(r))
+        nonempty = [c for c in cells if c]
+        if len(nonempty) < 3:                     # rotated-sidebar fragments, page furniture
+            continue
+        if max(len(c) for c in nonempty) > 90:    # body prose swallowed below the table
+            break
+        # dense rows of alphabetic word-fragments = shredded two-column body text
+        if len(kept) > 3 and len(nonempty) >= max(6, int(0.8 * width)) \
+                and sum(1 for c in nonempty if any(ch.isdigit() for ch in c)) < 0.3 * len(nonempty):
+            break
+        keep_idx.append(i)
+        kept.append(cells)
+    if len(kept) < 3:
+        return None, None
+    # index-anchored trim: if rows carry a "1. / 2. / 3." counter column, the table
+    # is exactly the contiguous indexed span (plus the header rows above it)
+    idx_rows = [j for j, r in enumerate(kept) if _IDX_CELL.match(r[0])]
+    if len(idx_rows) >= 5:
+        first, last = idx_rows[0], idx_rows[-1]
+        keep_idx = keep_idx[:last + 1]
+        kept = kept[:last + 1]
+    # heal word fragments split across column boundaries by the text strategy:
+    # "H|adGEM3", "U|nited States", "Eu||ropean Consortium", "EC-E|arth3-Veg".
+    # A fragment continues into the next non-empty cell when that cell starts
+    # lowercase and the left piece bears a truncation signature.
+    def _is_fragment(left: str) -> bool:
+        if not left or left[-1] in ".)]:%":            # index cells, complete tokens
+            return False
+        if len(left) <= 3 and left.isalpha():
+            return True
+        return len(left) <= 6 and any(ch.isalpha() for ch in left) \
+            and (left[-1].isupper() or "-" in left)    # "EC-E" style truncation
+
+    _intra = re.compile(r"\b([A-Za-z0-9]*(?:-[A-Za-z0-9]*)*[A-Z-]) ([a-z][A-Za-z0-9-]*)")
+
+    def _intra_fix(m: re.Match) -> str:
+        l, rr = m.group(1), m.group(2)
+        if "-" in l or "-" in rr or any(ch.isdigit() for ch in l + rr):
+            return l + rr                      # "EC-E arth3-Veg" -> "EC-Earth3-Veg"
+        return m.group(0)                      # "United States" stays two words
+
+    for r in kept:
+        for i, c in enumerate(r):
+            if c and " " in c:
+                r[i] = _intra.sub(_intra_fix, c)
+        for i in range(len(r) - 2, -1, -1):
+            left = r[i]
+            if not _is_fragment(left):
+                continue
+            j = next((k for k in range(i + 1, len(r)) if r[k]), None)
+            if j is not None and r[j][0].isalpha() and r[j][0].islower():
+                r[j] = left + r[j]
+                r[i] = ""
+
+    # drop columns that are empty in (almost) every kept row
+    fill = [sum(1 for r in kept if r[c]) for c in range(width)]
+    cols = [c for c in range(width) if fill[c] >= max(2, int(0.2 * len(kept)))]
+    if len(cols) < 3:
+        return None, None
+    kept = [[r[c] for c in cols] for r in kept]
+    first_data = next((i for i, r in enumerate(kept)
+                       if re.match(r"^\d+\.?$", r[0]) or sum(c.replace(".", "").isdigit() for c in r if c) >= 3), None)
+    if first_data and 0 < first_data <= 3:      # collapse wrapped header lines into one
+        header = [" ".join(x for x in (kept[j][c] for j in range(first_data)) if x).strip()
+                  for c in range(len(kept[0]))]
+        kept = [header] + kept[first_data:]
+    boxes = [row_bboxes[i] for i in keep_idx if i < len(row_bboxes) and row_bboxes[i]]
+    bbox = None
+    if boxes:
+        bbox = [min(b[0] for b in boxes), min(b[1] for b in boxes),
+                max(b[2] for b in boxes), max(b[3] for b in boxes)]
+    return kept, bbox
+
+
+def _caption_anchored_tables(page, cfg, existing_boxes):
+    """For each 'TABLE n' caption without a ruled table below it, detect an unruled
+    table via PyMuPDF's text strategy clipped under the caption, then clean the grid."""
+    out = []
+    cap_re = re.compile(cfg.table_caption_regex, re.IGNORECASE)
+    W, H = page.rect.width, page.rect.height
+    for x0, y0, x1, y1, text, *_ in page.get_text("blocks"):
+        if not cap_re.match(text.strip()):
+            continue
+        if any(tb[1] >= y1 - 5 and tb[1] <= y1 + 300 for tb in existing_boxes):
+            continue                               # a ruled table already covers this caption
+        # in two-column layouts the table lives in the caption's column
+        cx0, cx1 = 24, W - 30
+        if x1 < W * 0.55:
+            cx1 = W * 0.52                        # left-column table
+        elif x0 > W * 0.45:
+            cx0 = W * 0.48                        # right-column table
+        try:
+            found = page.find_tables(clip=fitz.Rect(cx0, y1 - 2, cx1, H), strategy="text").tables
+        except Exception:
+            continue
+        if not found:
+            continue
+        t = max(found, key=lambda t: (t.bbox[3] - t.bbox[1]) * (t.bbox[2] - t.bbox[0]))
+        try:
+            row_bboxes = [list(r.bbox) for r in t.rows]
+        except Exception:
+            row_bboxes = []
+        rows, bbox = _clean_text_grid(t.extract(), row_bboxes)
+        if rows:
+            out.append((rows, bbox or list(t.bbox)))
+    return out
+
 # --------------------------------------------------------------------------- OCR
 
 def _preprocess(img, cfg: ExtractionConfig):
@@ -242,6 +367,28 @@ def _pymupdf_extract(path: str, cfg: ExtractionConfig, result: ExtractionResult)
                         visual_ref=visual, metadata=meta))
             except Exception as exc:
                 result.warnings.append(f"table extraction failed on page {pno + 1}: {exc}")
+            if cfg.table_fallback == "text":
+                for rows, bbox in _caption_anchored_tables(page, cfg, table_boxes):
+                    table_boxes.append(bbox)
+                    text, extras, structured, trunc = serialize_table(
+                        rows, cfg.table_serializations, cfg.table_max_rows)
+                    visual = {"page": pno + 1, "bbox": bbox}
+                    if assets:
+                        try:
+                            crop = page.get_pixmap(clip=fitz.Rect(bbox), dpi=cfg.image_dpi)
+                            fp = os.path.join(assets, f"p{pno + 1}_table{len(table_els)}.png")
+                            crop.save(fp)
+                            visual["image_path"] = fp
+                        except Exception:
+                            pass
+                    meta = {"rows": len(rows), "cols": len(rows[0]),
+                            "truncated": trunc, "strategy": "caption-anchored-text"}
+                    if extras:
+                        meta["serializations"] = extras
+                    table_els.append(Element(
+                        kind="table", text=text, page=pno + 1, bbox=bbox,
+                        extractor="pymupdf-text", structured=structured,
+                        visual_ref=visual, metadata=meta))
 
         # --- text blocks (skip table interiors and boilerplate) ---
         sizes = [s["size"] for b in pd["blocks"] if b.get("type") == 0
@@ -312,6 +459,43 @@ def _pymupdf_extract(path: str, cfg: ExtractionConfig, result: ExtractionResult)
                             pass
                     fig_els.append(Element(kind="figure", text="", page=pno + 1, bbox=bbox,
                                            extractor="pymupdf", visual_ref=visual))
+
+        # --- vector figures: charts/maps/diagrams drawn as paths, not raster images ---
+        if cfg.extract_figures and cfg.vector_figures:
+            try:
+                clusters = page.cluster_drawings()
+            except Exception:
+                clusters = []
+            for ci, cr in enumerate(clusters):
+                w, h = cr.x1 - cr.x0, cr.y1 - cr.y0
+                if w * h < cfg.vector_figure_min_area or min(w, h) < cfg.vector_figure_min_dim:
+                    continue                                  # rules, underlines, ornaments
+                bbox = [cr.x0, cr.y0, cr.x1, cr.y1]
+                if any(_center_in(bbox, tb) or _center_in(tb, bbox) for tb in table_boxes):
+                    continue                                  # ruled tables are drawings too
+                # a decorated text block (abstract box, sidebar, callout) is not a figure:
+                # real charts/maps/diagrams are mostly ink, not mostly words
+                try:
+                    words = page.get_text("words", clip=cr)
+                    coverage = sum((x1 - x0) * (y1 - y0) for x0, y0, x1, y1, *_ in words) / (w * h)
+                    if coverage > cfg.figure_max_text_coverage:
+                        continue
+                except Exception:
+                    pass
+                if any(f.bbox and _center_in(bbox, f.bbox) for f in fig_els):
+                    continue                                  # already covered by a raster figure
+                visual = {"page": pno + 1, "bbox": bbox, "source": "vector"}
+                if assets:
+                    try:
+                        crop = page.get_pixmap(clip=cr, dpi=cfg.image_dpi)
+                        fp = os.path.join(assets, f"p{pno + 1}_vfig{ci}.png")
+                        crop.save(fp)
+                        visual["image_path"] = fp
+                    except Exception:
+                        pass
+                fig_els.append(Element(kind="figure", text="", page=pno + 1, bbox=bbox,
+                                       extractor="pymupdf", visual_ref=visual,
+                                       metadata={"vector": True}))
 
         # --- column-aware reading order over everything on the page ---
         page_items = [(el.bbox, el) for el in text_els + table_els + fig_els if el.bbox]

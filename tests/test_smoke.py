@@ -121,3 +121,13 @@ def test_bench_harness(tmp_path):
     assert agg["heading_recall"] >= 0.8
     assert agg["reading_order_tau"] is not None and agg["reading_order_tau"] >= 0.9
     assert agg["table_cell_f1"] is not None and agg["table_cell_f1"] >= 0.8
+
+
+def test_crlf_windows_line_endings(tmp_path):
+    """Files written on Windows (CRLF) must parse identically to LF files."""
+    p = tmp_path / "crlf.md"
+    p.write_bytes(b"# Title\r\n\r\n## Sub\r\n\r\nHello world. This paragraph is long enough to matter.\r\n")
+    r = extract(str(p), ExtractionConfig())
+    assert [(e.kind, e.level) for e in r.elements] == \
+        [("heading", 1), ("heading", 2), ("narrative", None)]
+    assert "\r" not in r.elements[2].text

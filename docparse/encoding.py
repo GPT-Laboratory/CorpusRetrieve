@@ -48,4 +48,8 @@ def read_text(path: str | Path) -> tuple[str, str]:
     """Read a text file with best-effort encoding detection → (text, encoding_used)."""
     raw = Path(path).read_bytes()
     enc = detect_encoding(raw)
-    return raw.decode(enc, errors="replace").lstrip("\ufeff"), enc
+    text = raw.decode(enc, errors="replace").lstrip("\ufeff")
+    # normalize Windows/old-Mac newlines: extractors split paragraphs on "\n\n",
+    # and CRLF files (any text file written on Windows) would otherwise collapse
+    # into a single element
+    return text.replace("\r\n", "\n").replace("\r", "\n"), enc

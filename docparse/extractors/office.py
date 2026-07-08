@@ -1,6 +1,7 @@
 """DOCX and XLSX extractors (heading levels, list items, three-view tables)."""
 from __future__ import annotations
 
+import os
 import re
 
 from docparse.router import register
@@ -24,9 +25,34 @@ class DocxExtractor:
         document = docx.Document(path)
         order = 0
         pending_caption: Element | None = None
+        img_n = 0
+        if cfg.assets_dir and cfg.extract_figures:
+            os.makedirs(cfg.assets_dir, exist_ok=True)
         for child in document.element.body.iterchildren():
             if child.tag == qn("w:p"):
                 para = Paragraph(child, document)
+                # embedded images: any drawing/blip in the paragraph -> figure element
+                if cfg.extract_figures:
+                    for blip in child.findall(".//" + qn("a:blip")):
+                        rid = blip.get(qn("r:embed"))
+                        rel = document.part.rels.get(rid) if rid else None
+                        if rel is None or "image" not in rel.reltype:
+                            continue
+                        img_n += 1
+                        visual = {"rel_id": rid, "content_type": rel.target_part.content_type}
+                        if cfg.assets_dir:
+                            ext = (rel.target_part.content_type or "image/png").split("/")[-1]
+                            fp = os.path.join(cfg.assets_dir, f"docx_fig{img_n}.{ext}")
+                            with open(fp, "wb") as fh:
+                                fh.write(rel.target_part.blob)
+                            visual["image_path"] = fp
+                        order += 1
+                        fig = Element(kind="figure", text="", order=order,
+                                      extractor="python-docx", visual_ref=visual)
+                        result.elements.append(fig)
+                        if pending_caption is not None:       # "Figure N:" directly above
+                            pending_caption.parent_id = fig.id
+                            pending_caption = None
                 text = para.text.strip()
                 if not text:
                     continue
@@ -48,6 +74,10 @@ class DocxExtractor:
                 order += 1
                 el = Element(kind=kind, text=text, order=order, level=level,
                              extractor="python-docx", metadata={"style": style or None})
+                if kind == "caption" and result.elements \
+                        and result.elements[-1].kind == "figure" \
+                        and result.elements[-1].parent_id is None:
+                    el.parent_id = result.elements[-1].id     # caption right below its image
                 result.elements.append(el)
                 pending_caption = el if kind == "caption" else None
             elif child.tag == qn("w:tbl"):
