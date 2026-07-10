@@ -131,7 +131,14 @@ def clean(result: ExtractionResult, cfg: ExtractionConfig) -> ExtractionResult:
     # 3) equations -> kind="formula" with a structured view and equation number
     n_eq = 0
     for i, el in enumerate(result.elements):
-        if el.kind in ("narrative", "list_item") and el.text and _looks_like_equation(el.text, cfg):
+        if not el.text:
+            continue
+        is_eq = el.kind in ("narrative", "list_item") and _looks_like_equation(el.text, cfg)
+        if el.kind == "heading" and _EQ_NUM.search(el.text) and len(el.text) < 120 \
+                and (sum(el.text.count(c) for c in _MATH_SYMBOLS) >= 1
+                     or ("=" in el.text and len(el.text.split()) <= 12)):
+            is_eq = True
+        if is_eq:
             num = None
             m = re.search(r"\((\d{1,2})\)", el.text)
             if m:
@@ -142,6 +149,7 @@ def clean(result: ExtractionResult, cfg: ExtractionConfig) -> ExtractionResult:
             nxt = next((e.id for e in result.elements[i + 1:]
                         if e.kind == "narrative" and len(e.text) > 60), None)
             el.kind = "formula"
+            el.level = None
             el.structured = {"number": num, "expression": expression}
             el.metadata.update({"context_before": prev, "context_after": nxt})
             n_eq += 1
@@ -369,7 +377,38 @@ _UNCERTAINTY = re.compile(r"±|\bconfidence\b|uncertaint|inter-?model|\bspread\b
 _CLAIM_VERB = re.compile(r"\b(show|shows|shown|found|find|increase[sd]?|decrease[sd]?|decline[sd]?|"
                          r"reduce[sd]?|project(?:ed|s)?|indicate[sd]?|suggest(?:ed|s)?|"
                          r"become[s]?|weaken(?:ed|s)?|warm(?:ing|ed|s)?|occur(?:red|s)?)\b", re.I)
-_CLAIM_ROLES = {"abstract", "results", "discussion", "conclusion"}
+_CLAIM_ROLES = {"abstract", "results", "discussion", "conclusion", "methods"}
+_CHANGE_NEAR = re.compile(r"increas|decreas|reduc|declin|drop|grow|rise|risen|fall|weaken|strengthen", re.I)
+_DEFINITION = re.compile(r"\bis defined as\b|\bwe define\b|\bdefined by\b|\bthreshold\b|\bcriterio?n\b", re.I)
+
+
+def _qty_type(q: str, sentence: str) -> str:
+    ql = q.lower()
+    if "once in" in ql:
+        return "return_period"
+    if "fold" in ql or "times" in ql:
+        return "ratio"
+    if "%" in q:
+        return "percentage_change" if _CHANGE_NEAR.search(sentence) else "percentage"
+    if "°c" in ql or re.search(r"\dK\b", q):
+        if re.search(r"global warming|warming level|gwl", sentence, re.I):
+            return "warming_level"
+        return "temperature_range" if re.search(r"–|—|\bto\b", q) else "temperature"
+    if re.search(r"days?\b", ql):
+        return "duration_days"
+    if re.search(r"years?\b", ql):
+        return "duration_years"
+    return "quantity"
+
+
+def _claim_type(sentence: str, role: str) -> str:
+    if _UNCERTAINTY.search(sentence):
+        return "uncertainty_claim"
+    if role == "methods" or _DEFINITION.search(sentence):
+        return "method_claim"
+    if role == "conclusion":
+        return "conclusion_claim"
+    return "result_claim"
 _SENT_SPLIT = re.compile(r"(?<=[.!?])\s+(?=[A-Z(])")
 
 
@@ -384,6 +423,8 @@ def _quantities_and_claims(result: ExtractionResult) -> None:
         qs = list(dict.fromkeys(q.strip() for q in qs))
         if qs:
             el.metadata["quantities"] = qs[:20]
+            el.metadata["quantities_labeled"] = [
+                {"value": q, "type": _qty_type(q, el.text)} for q in qs[:20]]
         if _UNCERTAINTY.search(el.text):
             el.metadata["uncertainty"] = True
         if el.kind == "caption":
@@ -392,23 +433,66 @@ def _quantities_and_claims(result: ExtractionResult) -> None:
             for sent in _SENT_SPLIT.split(el.text):
                 if len(sent) < 30 or len(sent) > 420:
                     continue
+                if el.metadata.get("role") == "methods" and not _DEFINITION.search(sent):
+                    continue
                 if _CLAIM_VERB.search(sent) and any(rx.search(sent) for rx in _QTY_RES):
+                    sq = [q for rx in _QTY_RES for q in rx.findall(sent)]
                     claims.append({"text": sent.strip(), "element_id": el.id,
-                                   "page": el.page, "role": el.metadata.get("role")})
+                                   "page": el.page, "role": el.metadata.get("role"),
+                                   "type": _claim_type(sent, el.metadata.get("role", "")),
+                                   "quantities": [{"value": q, "type": _qty_type(q, sent)}
+                                                  for q in dict.fromkeys(sq)]})
                     if len(claims) >= 40:
                         break
     if claims:
         result.stats["claims"] = claims
-    evidence = [{"text": e.text, "element_id": e.id, "page": e.page,
-                 "figure_id": e.parent_id, "quantities": e.metadata.get("quantities", [])}
-                for e in result.elements
-                if e.kind == "caption" and e.metadata.get("quantities")]
+    by_id = {e.id: e for e in result.elements}
+    evidence = []
+    for e in result.elements:
+        if e.kind != "caption" or not e.metadata.get("quantities"):
+            continue
+        parent = by_id.get(e.parent_id)
+        label = e.metadata.get("label", "")
+        etype = parent.kind if parent is not None else \
+            ("table" if label.lower().startswith("table") else
+             "figure" if label else "visual")
+        evidence.append({"evidence_type": etype, "label": label or None,
+                         "text": e.text, "element_id": e.id, "page": e.page,
+                         "ref_id": e.parent_id,
+                         "quantities": e.metadata.get("quantities_labeled",
+                                                      e.metadata.get("quantities", []))})
     if evidence:
         result.stats["visual_evidence"] = evidence
 
 
+_LABEL_RE = re.compile(
+    r"^\s*(fig(?:ure)?|table|kuva|tab(?:elle)?|abb(?:ildung)?|plate|scheme|chart|exhibit)"
+    r"\.?\s*(\d+[A-Za-z]?)", re.IGNORECASE)
+_LABEL_NORM = {"fig": "Figure", "figure": "Figure", "kuva": "Figure", "abb": "Figure",
+               "abbildung": "Figure", "table": "Table", "tab": "Table", "tabelle": "Table",
+               "plate": "Plate", "scheme": "Scheme", "chart": "Chart", "exhibit": "Exhibit"}
+
+
+def _label_visuals(result: ExtractionResult) -> None:
+    by_id = {e.id: e for e in result.elements}
+    for cap in result.elements:
+        if cap.kind != "caption" or not cap.text:
+            continue
+        m = _LABEL_RE.match(cap.text)
+        if not m:
+            continue
+        label = f"{_LABEL_NORM.get(m.group(1).lower(), m.group(1).title())} {m.group(2)}"
+        cap.metadata["label"] = label
+        parent = by_id.get(cap.parent_id)
+        if parent is not None:
+            parent.metadata["label"] = label
+            if parent.kind == "table" and isinstance(parent.structured, dict):
+                parent.structured.setdefault("table_number", label)
+
+
 def annotate(result: ExtractionResult, cfg: ExtractionConfig) -> ExtractionResult:
     _assign_roles(result)
+    _label_visuals(result)
     _extract_paper_metadata(result)
     _link_citations(result)
     _quantities_and_claims(result)

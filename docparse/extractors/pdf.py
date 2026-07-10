@@ -126,7 +126,7 @@ def _clean_text_grid(rows, row_bboxes):
     # index-anchored trim: if rows carry a "1. / 2. / 3." counter column, the table
     # is exactly the contiguous indexed span (plus the header rows above it)
     idx_rows = [j for j, r in enumerate(kept) if _IDX_CELL.match(r[0])]
-    if len(idx_rows) >= 5:
+    if len(idx_rows) >= 3:
         first, last = idx_rows[0], idx_rows[-1]
         keep_idx = keep_idx[:last + 1]
         kept = kept[:last + 1]

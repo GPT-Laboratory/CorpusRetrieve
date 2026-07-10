@@ -40,17 +40,32 @@ _PROMPT = (
 
 
 def _parse_facts(raw: str) -> dict | None:
-    """Pull the JSON object out of the model reply; tolerate code fences and chatter."""
+    """Pull the JSON object out of the model reply; tolerate code fences, chatter,
+    and nested braces (a lazy regex truncates at the first inner '}')."""
     import json as _json
-    import re as _re
-    m = _re.search(r"```(?:json)?\s*(\{.*?\})\s*```", raw, _re.S) or _re.search(r"\{.*\}", raw, _re.S)
-    if not m:
-        return None
-    try:
-        obj = _json.loads(m.group(1) if m.lastindex else m.group(0))
-        return obj if isinstance(obj, dict) and "description" in obj else None
-    except Exception:
-        return None
+
+    def balanced(text: str):
+        start = text.find("{")
+        while start != -1:
+            depth = 0
+            for j in range(start, len(text)):
+                if text[j] == "{":
+                    depth += 1
+                elif text[j] == "}":
+                    depth -= 1
+                    if depth == 0:
+                        yield text[start:j + 1]
+                        break
+            start = text.find("{", start + 1)
+
+    for cand in balanced(raw):
+        try:
+            obj = _json.loads(cand)
+        except Exception:
+            continue
+        if isinstance(obj, dict) and "description" in obj:
+            return obj
+    return None
 
 
 def describe_figures(result: ExtractionResult, describe, kinds=("figure",), overwrite=False) -> int:
@@ -71,8 +86,17 @@ def describe_figures(result: ExtractionResult, describe, kinds=("figure",), over
         if desc:
             facts = _parse_facts(desc)
             if facts:                                       # structured, queryable
-                el.text = facts.get("description", "").strip() or desc.strip()
-                el.structured = {"figure_facts": facts}
+                prose = facts.get("description", "").strip()
+                for panel in facts.get("panels") or []:
+                    if isinstance(panel, dict) and panel.get("takeaway"):
+                        prose += f"\nPanel {panel.get('id', '?')}: {panel['takeaway']}"
+                el.text = prose or desc.strip()
+                el.structured = {
+                    "figure_number": el.metadata.get("label"),      # "Figure 1", from caption
+                    "figure_type": facts.get("type"),
+                    "panels": facts.get("panels") or [],
+                    "figure_facts": facts,
+                }
                 el.metadata["vlm_type"] = facts.get("type")
             else:                                           # fall back to prose
                 el.text = desc.strip()

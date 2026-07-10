@@ -131,3 +131,22 @@ def test_crlf_windows_line_endings(tmp_path):
     assert [(e.kind, e.level) for e in r.elements] == \
         [("heading", 1), ("heading", 2), ("narrative", None)]
     assert "\r" not in r.elements[2].text
+
+
+def test_golden_multimodal_ground_truth(tmp_path):
+    """Unruled table, vector figure, and formula on golden page 3 must all extract."""
+    pytest.importorskip("fitz")
+    golden = build(tmp_path / "golden")
+    r = extract(str(golden / "report.pdf"), ExtractionConfig())
+    tables = [e for e in r.elements if e.kind == "table"]
+    unruled = [t for t in tables if t.metadata.get("strategy") == "caption-anchored-text"]
+    assert unruled, "caption-anchored table not detected"
+    rows = unruled[0].structured["rows"]
+    flat = [c for row in rows for c in row]
+    assert len(rows) >= 3 and "North" in flat and "12" in flat
+    figs = [e for e in r.elements if e.kind == "figure" and e.metadata.get("vector")]
+    assert figs and figs[0].page == 3, "vector bar chart not detected"
+    caps = [e for e in r.elements if e.kind == "caption" and e.metadata.get("label") == "Figure 1"]
+    assert caps and caps[0].parent_id == figs[0].id, "figure caption not linked/labeled"
+    formulas = [e for e in r.elements if e.kind == "formula"]
+    assert formulas and formulas[0].structured.get("number") == 1

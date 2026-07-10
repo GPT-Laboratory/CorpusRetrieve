@@ -63,6 +63,28 @@ def make_pdf(path: Path) -> dict:
             page.insert_textbox((72, 120, 523, 260),
                                 f"Closing outlook narrative on the final page. {LOREM}", fontsize=10)
             gt["reading_order"] += ["Outlook", "Closing outlook narrative on the final page"]
+            # --- multimodal ground truth: unruled caption-anchored table (left column) ---
+            page.insert_text((72, 292), "TABLE 2  Regional staff allocation.", fontsize=9)
+            unruled = [["", "Region", "Staff", "Sites"],
+                       ["1.", "North", "12", "3"], ["2.", "South", "9", "2"],
+                       ["3.", "East", "7", "4"], ["4.", "West", "5", "1"]]
+            xs = (76, 110, 190, 250)
+            for r, row in enumerate(unruled):
+                for c, cell in enumerate(row):
+                    if cell:
+                        page.insert_text((xs[c], 312 + r * 16), cell, fontsize=9)
+            # --- vector figure: a small bar chart drawn as paths (right column) ---
+            page.draw_line((340, 460), (540, 460))                      # x-axis
+            page.draw_line((340, 320), (340, 460))                      # y-axis
+            for i, hgt in enumerate((60, 95, 40, 120)):
+                x = 355 + i * 45
+                page.draw_rect(fitz.Rect(x, 460 - hgt, x + 28, 460),
+                               color=(0, 0, 0), fill=(0.4, 0.5, 0.8))
+            page.insert_text((340, 478), "FIGURE 1: Sales by region.", fontsize=9)
+            # --- formula with equation number ---
+            page.insert_text((72, 560), "E = mc2 \u00b1 0.5 (1)", fontsize=11)
+            page.insert_textbox((72, 575, 523, 640),
+                                f"The formula above defines the error band. {LOREM}", fontsize=10)
 
     doc.save(str(path))
     doc.close()
