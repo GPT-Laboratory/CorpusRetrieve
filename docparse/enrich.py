@@ -107,11 +107,33 @@ def describe_figures(result: ExtractionResult, describe, kinds=("figure",), over
     return n
 
 
+def _resolve_api_key(api_key: str | None) -> str:
+    """Explicit arg > environment > .env file (searched upward from CWD).
+
+    The .env load is a no-op if python-dotenv is missing or no file exists,
+    so nothing here makes the VLM stage mandatory — it stays opt-in.
+    """
+    if api_key:
+        return api_key
+    if not os.environ.get("ANTHROPIC_API_KEY"):
+        try:
+            from dotenv import find_dotenv, load_dotenv
+            load_dotenv(find_dotenv(usecwd=True))
+        except ImportError:
+            pass
+    key = os.environ.get("ANTHROPIC_API_KEY", "")
+    if not key:
+        raise RuntimeError(
+            "ANTHROPIC_API_KEY not set. Put ANTHROPIC_API_KEY=sk-ant-... in a .env "
+            "file at the project root (see .env.example) or export it in your shell.")
+    return key
+
+
 def make_anthropic_describer(model: str = "claude-sonnet-4-6", api_key: str | None = None,
                              max_tokens: int = 700):
     """Reference implementation using the Anthropic API (pip install anthropic)."""
     import anthropic                                    # optional dependency
-    client = anthropic.Anthropic(api_key=api_key) if api_key else anthropic.Anthropic()
+    client = anthropic.Anthropic(api_key=_resolve_api_key(api_key))
 
     def describe(image_path: str, context: str = "") -> str:
         media = mimetypes.guess_type(image_path)[0] or "image/png"

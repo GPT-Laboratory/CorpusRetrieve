@@ -13,6 +13,7 @@ build/
 venv/
 env/
 ENV/
+.env
 
 # ---- Test / tooling caches ----
 .pytest_cache/
@@ -25,6 +26,7 @@ htmlcov/
 
 # ---- docparse output (generated, not source) ----
 report.json
+chunks.json
 *.out.json
 assets/
 out/

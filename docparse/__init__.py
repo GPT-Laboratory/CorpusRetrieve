@@ -16,10 +16,12 @@ from docparse import extractors as _extractors  # noqa: F401  (registers built-i
 from docparse.router import get_extractor, register, register_fn, registered_types
 from docparse.models import Element, ExtractionConfig, ExtractionResult
 from docparse.pipeline import extract, extract_path, extract_zip
+from docparse.chunking import Chunk, ChunkingConfig, ChunkingResult, chunk_result
 
 __version__ = "0.1.0"
 __all__ = [
     "extract", "extract_path", "extract_zip",
+    "chunk_result", "Chunk", "ChunkingConfig", "ChunkingResult",
     "Element", "ExtractionResult", "ExtractionConfig",
     "register", "register_fn", "get_extractor", "registered_types",
 ]

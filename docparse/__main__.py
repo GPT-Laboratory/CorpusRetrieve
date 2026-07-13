@@ -40,6 +40,10 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="docparse", description="Generic document extractor.")
     ap.add_argument("paths", nargs="+", help="files, directories, or .zip archives")
     ap.add_argument("--json", action="store_true", help="emit full JSON")
+    ap.add_argument("--chunks", action="store_true",
+                    help="emit retrieval-ready chunks JSON (element-aware chunking)")
+    ap.add_argument("--chunk-target-tokens", type=int, default=400)
+    ap.add_argument("--chunk-table-rows", type=int, default=6)
     ap.add_argument("--summary", action="store_true", help="emit per-file summary (default)")
     ap.add_argument("--out", default=None, help="write output to this file as UTF-8 (bypasses console encoding)")
     ap.add_argument("--backend", default="auto", choices=["auto", "pymupdf", "pdfplumber"])
@@ -82,6 +86,18 @@ def main(argv: list[str] | None = None) -> int:
     for r in all_results:
         _maybe_describe(r, args)
 
+    if args.chunks:
+        from docparse.chunking import ChunkingConfig, chunk_result
+        ccfg = ChunkingConfig(target_tokens=args.chunk_target_tokens,
+                              table_rows_per_group=args.chunk_table_rows)
+        payload = json.dumps([chunk_result(r, ccfg).to_dict() for r in all_results],
+                             ensure_ascii=False, indent=2)
+        if args.out:
+            with open(args.out, "w", encoding="utf-8") as fh:
+                fh.write(payload + "\n")
+        else:
+            sys.stdout.write(payload + "\n")
+        return 0
     if args.json:
         payload = json.dumps([r.to_dict() for r in all_results], ensure_ascii=False, indent=2)
         if args.out:
