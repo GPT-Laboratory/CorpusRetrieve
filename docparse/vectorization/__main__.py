@@ -3,7 +3,7 @@ Ingests typed chunks into a local Qdrant DB + knowledge graph, runs
 validation, and optionally answers ad-hoc queries with --query.
 """
 import argparse, json, sys
-from docparse.stage5.ingest import IngestConfig, hybrid_query, ingest
+from docparse.vectorization.ingest import IngestConfig, hybrid_query, ingest
 
 
 def main() -> int:
@@ -22,7 +22,7 @@ def main() -> int:
     cfg = IngestConfig(tenant=args.tenant, embedder=args.embedder,
                        db_location=f"{args.out}/qdrant", graph_outdir=args.out)
     res, store, kg, sparse = ingest(args.chunks, cfg)
-    from docparse.stage5.ingest import resolve_embedder
+    from docparse.vectorization.ingest import resolve_embedder
     emb = resolve_embedder(args.embedder)
 
     print(json.dumps({"doc_id": res.doc_id, "collections": res.collections,

@@ -19,7 +19,7 @@ from typing import Any
 
 import networkx as nx
 
-from docparse.stage5.vectorstore import COLLECTION_OF, point_uuid
+from docparse.vectorization.vectorstore import COLLECTION_OF, point_uuid
 
 _CHUNK_NODE_TYPE = {
     "claim": "Claim", "section_text": "Chunk", "summary": "Chunk",

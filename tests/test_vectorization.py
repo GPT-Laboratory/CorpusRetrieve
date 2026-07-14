@@ -4,9 +4,9 @@ import json
 
 import pytest
 
-from docparse.stage5 import (HashingEmbedder, IngestConfig, hybrid_query, ingest)
-from docparse.stage5.canonical import canonical_text, normalize_quantity
-from docparse.stage5.vectorstore import point_uuid
+from docparse.vectorization import (HashingEmbedder, IngestConfig, hybrid_query, ingest)
+from docparse.vectorization.canonical import canonical_text, normalize_quantity
+from docparse.vectorization.vectorstore import point_uuid
 
 
 @pytest.fixture()
