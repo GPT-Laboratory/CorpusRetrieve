@@ -13,3 +13,5 @@ beautifulsoup4>=4.12
 lingua-language-detector>=2.0   # optional: much better language detection than langdetect
 anthropic>=0.40            # VLM figure description (docparse.enrich); usage stays opt-in
 python-dotenv>=1.0         # loads ANTHROPIC_API_KEY from a .env file
+qdrant-client>=1.12       # vector store (local mode works offline)
+networkx>=3.2             # knowledge graph (vendor-neutral property graph)

@@ -31,6 +31,7 @@ chunks.json
 assets/
 out/
 output/
+vectorization_output/
 
 # ---- Jupyter ----
 .ipynb_checkpoints/
