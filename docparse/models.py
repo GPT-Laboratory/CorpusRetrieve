@@ -142,10 +142,15 @@ class ExtractionConfig:
         r"wiley online library", r"terms and conditions", r"onlinelibrary\.wiley\.com",
         r"downloaded (?:from|by)", r"creative ?commons licen[cs]e", r"creativecommons\.org",
         r"rules of use.*oa articles", r"governed by the applicable", r"see the terms",
+        r"©\s*(?:19|20)\d{2}\s+the\s+authors?\b", r"open access article under the terms",
         r"all rights reserved", r"authorized licensed use",          # IEEE
         r"content may change prior to final publication",            # IEEE early access
         r"springer(?:link)? (?:nature|terms)", r"elsevier (?:b\.v\.|ltd|inc)",
         r"provided by .{0,40}repository", r"^\s*\d{7,},?\s*(19|20)\d{2}",
+        r"open access article under the terms", r"©\s*(19|20)\d{2}\s*the author",
+        r"^\s*\d+\s+of\s+\d+\s*$",                        # "1 of 17" page footer
+        r"https?://doi\.org/\S+",
+        r"^\s*(?:international\s+)?journal of [a-z]+[a-z ]{0,40}$",  # journal footer line
     )
 
     # unruled tables: caption-anchored text-strategy detection when ruled detection finds none

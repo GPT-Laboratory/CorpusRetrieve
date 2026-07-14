@@ -25,10 +25,36 @@ def _promote_list_items(result: ExtractionResult, cfg: ExtractionConfig) -> None
             el.kind = "list_item"
 
 
+_MOJIBAKE = re.compile(r"[\uac00-\ud7af\ufffd\u25a1]")   # CP949-misdecoded Δ etc.
+
+
+def _is_pseudo_heading(text: str) -> bool:
+    """Table header rows, axis labels, and mojibake fragments that a font-size
+    heuristic promoted to 'heading' — they must not become section titles."""
+    t = text.strip()
+    if not t:
+        return True
+    if _MOJIBAKE.search(t):
+        return True
+    toks = t.split()
+    numish = sum(1 for w in toks if re.search(r"\d|°|%|±", w))
+    # column-header shape: several short unit/number tokens, no sentence structure
+    if len(toks) >= 3 and numish >= max(2, len(toks) // 2):
+        return True
+    if len(toks) >= 4 and all(len(w) <= 12 for w in toks) \
+            and numish >= 2 and not re.search(r"\b(?:and|of|in|for|the)\b", t, re.I):
+        return True
+    return False
+
+
 def _assign_section_paths(result: ExtractionResult) -> None:
     stack: list[tuple[int, str]] = []  # (level, heading text)
     for el in result.elements:
         if el.kind in ("title", "heading"):
+            if el.kind == "heading" and _is_pseudo_heading(el.text):
+                el.metadata["pseudo_heading"] = True
+                el.section_path = [t for _, t in stack]
+                continue                       # never enters the section stack
             level = el.level if el.level is not None else (0 if el.kind == "title" else 1)
             while stack and stack[-1][0] >= level:
                 stack.pop()

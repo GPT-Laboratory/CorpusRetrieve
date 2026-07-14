@@ -89,7 +89,131 @@ def _looks_like_equation(text: str, cfg: ExtractionConfig) -> bool:
     return (numbered and (symbols >= 1 or words <= 12)) or (symbols >= 2 and words <= 30)
 
 
+_PAGE_MARKER = re.compile(r"^\s*\d{1,3}\s+of\s+\d{1,3}\s*$", re.I)
+_DOI_LINE = re.compile(r"^\s*(?:https?://)?(?:dx\.)?doi\.org/\S+\s*$", re.I)
+
+
+def _scrub_inline_noise(text: str, lic_re: re.Pattern) -> tuple[str, int]:
+    """Remove license/footer sentences *inside* long elements instead of dropping
+    the whole element (PDF extraction often fuses footers into body paragraphs)."""
+    removed = 0
+    lines: list[str] = []
+    for line in text.split("\n"):
+        if _PAGE_MARKER.match(line) or _DOI_LINE.match(line):
+            removed += 1
+            continue
+        lines.append(line)
+    parts = re.split(r"(?<=[.!?])\s+", "\n".join(lines))
+    kept = []
+    for p in parts:
+        if p and lic_re.search(p) and len(p) < 400:
+            removed += 1
+            continue
+        kept.append(p)
+    return " ".join(k for k in kept if k).strip(), removed
+
+
+_NUMISH = re.compile(r"\d|°C|%")
+_NUMBERED_HEADING = re.compile(r"^\d+(?:\.\d+)*\s*[|.\u2012-\u2015-]?\s+\S")
+_LOWER_WORD = re.compile(r"^[a-z][a-z-]+$")
+_UNIT_WORDS = {"day", "days", "year", "years", "month", "months", "hour", "hours",
+               "week", "weeks", "min", "max", "mean", "median", "std"}
+_FRONT_MATTER_HEADING = re.compile(
+    r"^\s*(?:(?:research|original|review)\s+article(?:\s+open\s+access)?"
+    r"|open\s+access|(?:short|technical)\s+communication"
+    r"|(?:international\s+)?journal\s+of\s+[a-z][a-z ]{0,40}"
+    r"|author\s+contributions?|conflicts?\s+of\s+interest(?:\s+disclosures?)?"
+    r"|data\s+availability(?:\s+statement)?|ethics\s+statement"
+    r"|orcid|correspondence|keywords)\s*$", re.I)
+
+
+def _fake_heading(text: str) -> bool:
+    """Table header rows and broken-glyph fragments must not become sections.
+
+    Real scientific headings may legitimately contain several numbers —
+    "3.1 | Changes in Cold Days at 1.0°C, 1.5°C and 2.0°C Warming Levels" —
+    so numeric density alone is NOT sufficient evidence. A table header has
+    numbers AND no connective prose ("Model Country Npar 1.0°C 1.5°C 2.0°C"
+    contains zero lowercase words). Numbered section headings and
+    equation-like lines are always exempt."""
+    if _EQ_NUM.search(text) or any(c in _MATH_SYMBOLS for c in text) or "=" in text:
+        return False
+    if _NUMBERED_HEADING.match(text.strip()):
+        return False                                   # "2.3 | Cold Extreme Indices"
+    toks = text.split()
+    if len(toks) < 3:
+        return False
+    if sum(1 for t in toks if _LOWER_WORD.match(t) and t not in _UNIT_WORDS) >= 2:
+        return False                                   # connective prose => real title
+    numish = sum(1 for t in toks if _NUMISH.search(t))
+    nonlatin = bool(re.search(r"[\u1100-\uD7FF\uF900-\uFFFF]", text))
+    return numish >= 3 or numish / len(toks) > 0.5 or (nonlatin and numish >= 1)
+
+
+_BACK_MATTER_HEADING = re.compile(
+    r"^\s*(?:acknowledg(?:e)?ments?|appendix(?:\s+[A-Z0-9])?|funding|references?"
+    r"|bibliography|supporting information|data availability(?:\s+statement)?"
+    r"|author contributions?|conflicts? of interest)\b", re.I)
+_CAPTION_LINE = re.compile(r"^\s*(FIGURE|TABLE|FIG\.?)\s+(\d+)\s*[|.:\u2012-\u2015]\s+", re.I)
+
+
+def _promote_caption_narratives(result: ExtractionResult) -> None:
+    claimed = {e.parent_id for e in result.elements if e.kind == "caption" and e.parent_id}
+    targets = [e for e in result.elements if e.kind in ("figure", "table")
+               and e.id not in claimed]
+    promoted = 0
+    for el in result.elements:
+        if el.kind not in ("narrative", "other") or not el.text:
+            continue
+        m = _CAPTION_LINE.match(el.text)
+        if not m or len(el.text) > 900:                   # captions are shortish
+            continue
+        kind_word, num = m.group(1).upper(), m.group(2)
+        label = ("Table " if kind_word.startswith("TAB") else "Figure ") + num
+        want = "table" if kind_word.startswith("TAB") else "figure"
+        near = [t for t in targets if t.kind == want and t.page == el.page]
+        el.kind = "caption"
+        el.metadata["label"] = label
+        if near:
+            tgt = min(near, key=lambda t: abs((t.order or 0) - (el.order or 0))
+                      if hasattr(t, "order") else 0)
+            el.parent_id = tgt.id
+            tgt.metadata.setdefault("label", label)
+            targets.remove(tgt)
+        promoted += 1
+    if promoted:
+        result.stats["captions_promoted"] = promoted
+
+
 def clean(result: ExtractionResult, cfg: ExtractionConfig) -> ExtractionResult:
+    # 0) headings that are really table headers / visual fragments
+    demoted = 0
+    for el in result.elements:
+        if el.kind != "heading" or not el.text:
+            continue
+        if _FRONT_MATTER_HEADING.match(el.text):
+            el.kind = "other"                          # banner: metadata, not a section
+            el.level = None
+            el.metadata["front_matter_banner"] = True
+            demoted += 1
+        elif _fake_heading(el.text):
+            el.kind = "other"
+            el.level = None
+            demoted += 1
+    if demoted:
+        result.stats["fake_headings_demoted"] = demoted
+
+    # 0b) back-matter headings are top-level: Acknowledgements etc. must not
+    # nest under "6 | Conclusions" just because they carry no section number
+    for el in result.elements:
+        if el.kind == "heading" and el.text and _BACK_MATTER_HEADING.match(el.text):
+            el.level = 1
+
+    # 0c) publisher caption blocks extracted as narratives ("FIGURE 1 | ..."):
+    # promote to caption elements, derive the label, link to the nearest
+    # unclaimed figure/table on the same page
+    _promote_caption_narratives(result)
+
     # 1) publisher license / download boilerplate — anywhere on the page, any orientation
     kept: list[Element] = []
     removed = 0
@@ -99,6 +223,13 @@ def clean(result: ExtractionResult, cfg: ExtractionConfig) -> ExtractionResult:
                 and (len(el.text) < 600 or len(lic_re.findall(el.text)) >= 2):
             removed += 1
             continue
+        # long element with fused footer/license text: scrub inline, keep the science
+        if el.kind in _TEXT_KINDS and el.text and (lic_re.search(el.text)
+                                                   or "\n" in el.text):
+            el.text, n = _scrub_inline_noise(el.text, lic_re)
+            removed += 1 if n else 0
+            if not el.text:
+                continue
         kept.append(el)
     if removed:
         result.elements = kept
@@ -241,13 +372,31 @@ def _assign_roles(result: ExtractionResult) -> None:
                 body_started = body_started or role not in ("front_matter", "abstract")
             elif body_started:
                 current = current if (el.level or 1) > 1 else "body"
+            elif _NUMBERED_HEADING.match(el.text or ""):
+                current = "body"                     # numbered section: body began
+                body_started = True
             else:
                 current = "front_matter"
         elif not body_started and re.match(r"^\s*abstract\b", el.text or "", re.I):
             current = "abstract"
         el.metadata["role"] = current
         dist[current] += 1
-    result.stats["role_distribution"] = dict(dist)
+
+    # safety net: "abstract" is a short contiguous block near the front. If it
+    # runs away (heading detection failed for this corpus), downgrade the tail
+    # to "body" so summary/claim builders can't absorb the whole paper.
+    abs_els = [e for e in result.elements if e.metadata.get("role") == "abstract"]
+    if abs_els:
+        first_page = abs_els[0].page or 1
+        cut = 0
+        for e in abs_els:
+            if (e.page or first_page) > first_page + 1 or cut >= 30:
+                e.metadata["role"] = "body"
+                dist["abstract"] -= 1
+                dist["body"] += 1
+            else:
+                cut += 1
+    result.stats["role_distribution"] = {k: v for k, v in dist.items() if v}
 
 
 _DOI_RE = re.compile(r"\b10\.\d{4,9}/[-._;()/:a-zA-Z0-9]+\b")
@@ -368,11 +517,14 @@ def _link_citations(result: ExtractionResult) -> None:
 
 
 _QTY_RES = [
+    re.compile(r"\d+(?:\.\d+)?\s*(?:–|—|‒|-|to)\s*\d+(?:\.\d+)?\s*°C\s*days?\b", re.I),
+    re.compile(r"\d+(?:\.\d+)?\s*°C\s*days?\b", re.I),                     # degree-day index
     re.compile(r"\d+(?:\.\d+)?\s*(?:–|—|‒|-|to)\s*\d+(?:\.\d+)?\s*(?:%|°C|K\b|days?\b|years?\b)"),
     re.compile(r"\d+(?:\.\d+)?\s*(?:%|°C|hPa|mm)\b"),
     re.compile(r"once in (?:about |approximately )?\d+(?:\s*(?:–|-|to)\s*\d+)?\s*years?", re.I),
     re.compile(r"\b\d+(?:\.\d+)?[- ](?:fold|times)\b", re.I),
 ]
+_EXTREMITY_NEAR = re.compile(r"\bEX\b|extremity|cold spell", re.I)
 _UNCERTAINTY = re.compile(r"±|\bconfidence\b|uncertaint|inter-?model|\bspread\b|\bensemble range\b", re.I)
 _CLAIM_VERB = re.compile(r"\b(show|shows|shown|found|find|increase[sd]?|decrease[sd]?|decline[sd]?|"
                          r"reduce[sd]?|project(?:ed|s)?|indicate[sd]?|suggest(?:ed|s)?|"
@@ -388,11 +540,17 @@ def _qty_type(q: str, sentence: str) -> str:
         return "return_period"
     if "fold" in ql or "times" in ql:
         return "ratio"
+    if re.search(r"°c\s*[- ]?days?", ql):                    # 160°C days != 160°C
+        return "extremity_index" if _EXTREMITY_NEAR.search(sentence) else "degree_days"
     if "%" in q:
         return "percentage_change" if _CHANGE_NEAR.search(sentence) else "percentage"
     if "°c" in ql or re.search(r"\dK\b", q):
-        if re.search(r"global warming|warming level|gwl", sentence, re.I):
-            return "warming_level"
+        m = re.search(r"\d+(?:\.\d+)?", q)
+        first = float(m.group(0)) if m else 0.0
+        if re.search(r"global warming|warming level|gwl", sentence, re.I) and first <= 6.0:
+            return "warming_level"                            # 40°C is never a GWL
+        if _EXTREMITY_NEAR.search(sentence) and first > 6.0:
+            return "extremity_index"
         return "temperature_range" if re.search(r"–|—|\bto\b", q) else "temperature"
     if re.search(r"days?\b", ql):
         return "duration_days"

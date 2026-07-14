@@ -19,6 +19,7 @@ from __future__ import annotations
 import base64
 import mimetypes
 import os
+import re
 
 from docparse.models import ExtractionResult
 
@@ -33,7 +34,9 @@ _PROMPT = (
     '              "notable_values": [{{"item": "region/series/category", "value": "..."}}],\n'
     '              "takeaway": "..."}}]\n'
     "}}\n"
-    "If it is not a real figure (a text block, logo, decoration), say so in type and keep "
+    "The panels array is REQUIRED whenever the figure has multiple panels/subplots "
+    "(labeled A/B/C, a/b/c, or arranged in a grid) — one entry per panel. "
+"If it is not a real figure (a text block, logo, decoration), say so in type and keep "
     "description one sentence. Be factual; never invent values you cannot read.\n"
     "Caption for context:\n{caption}"
 )
@@ -43,6 +46,7 @@ def _parse_facts(raw: str) -> dict | None:
     """Pull the JSON object out of the model reply; tolerate code fences, chatter,
     and nested braces (a lazy regex truncates at the first inner '}')."""
     import json as _json
+    import re
 
     def balanced(text: str):
         start = text.find("{")
@@ -65,6 +69,29 @@ def _parse_facts(raw: str) -> dict | None:
             continue
         if isinstance(obj, dict) and "description" in obj:
             return obj
+
+    # salvage: the reply was truncated mid-JSON (hit max_tokens). Recover what
+    # is recoverable — the description string and any COMPLETE panel objects —
+    # rather than dumping raw fenced JSON into the element text.
+    out: dict = {}
+    if (m := re.search(r'"type"\s*:\s*"([^"]*)"', raw)):
+        out["type"] = m.group(1)
+    if (m := re.search(r'"description"\s*:\s*"((?:[^"\\]|\\.)*)', raw)):
+        out["description"] = m.group(1).replace('\\"', '"').rstrip("\\")
+    panels = []
+    if (pm := re.search(r'"panels"\s*:\s*\[', raw)):
+        for cand in balanced(raw[pm.end():]):
+            try:
+                p = _json.loads(cand)
+            except Exception:
+                break                              # first broken object = truncation point
+            if isinstance(p, dict) and p.get("id"):
+                panels.append(p)
+    if panels:
+        out["panels"] = panels
+    if out.get("description"):
+        out["truncated"] = True
+        return out
     return None
 
 
@@ -99,7 +126,7 @@ def describe_figures(result: ExtractionResult, describe, kinds=("figure",), over
                 }
                 el.metadata["vlm_type"] = facts.get("type")
             else:                                           # fall back to prose
-                el.text = desc.strip()
+                el.text = re.sub(r"```(?:json)?|```", "", desc).strip()
             el.metadata["description"] = "vlm"
             n += 1
     if n:
@@ -130,7 +157,7 @@ def _resolve_api_key(api_key: str | None) -> str:
 
 
 def make_anthropic_describer(model: str = "claude-sonnet-4-6", api_key: str | None = None,
-                             max_tokens: int = 700):
+                             max_tokens: int = 1600):
     """Reference implementation using the Anthropic API (pip install anthropic)."""
     import anthropic                                    # optional dependency
     client = anthropic.Anthropic(api_key=_resolve_api_key(api_key))

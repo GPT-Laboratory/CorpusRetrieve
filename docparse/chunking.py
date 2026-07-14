@@ -1,6 +1,6 @@
 """Element-aware chunking: ExtractionResult -> retrieval-ready Chunks.
 
-Design notes:
+Design notes (why this differs from the naive "10 chunk types" recipe):
 
 * Chunks are built from parsed Elements, never from raw character streams —
   the whole point of docparse is that structure survives to this stage.
@@ -95,6 +95,21 @@ class ChunkingConfig:
 
     # summaries
     summary_roles: tuple[str, ...] = ("abstract", "conclusion")
+    summary_max_tokens: int = 600     # hard cap; truncate at sentence boundary
+
+    # defense-in-depth: sentences/lines matching these never enter chunk text,
+    # even if upstream cleaning missed them (extend per corpus)
+    boilerplate_patterns: tuple[str, ...] = (
+        r"open access article under the terms",
+        r"creative ?commons licen[cs]e", r"creativecommons\.org",
+        r"©\s*(?:19|20)\d{2}", r"all rights reserved",
+        r"^\s*\d+\s+of\s+\d+\s*$",                    # "1 of 17"
+        r"https?://doi\.org/\S+",
+        r"downloaded (?:from|by)", r"terms and conditions",
+        r"wiley online library", r"rules of use",
+        r"^\s*(?:international\s+)?journal of [a-z][a-z ]{0,40}$",
+    )
+    min_section_tokens: int = 120     # merge adjacent section chunks below this
 
 
 @dataclass
@@ -119,6 +134,35 @@ _TAB_MENTION = re.compile(r"\btables?\s*(\d+[A-Za-z]?)", re.I)
 _EQ_MENTION = re.compile(r"\b(?:eq(?:uation)?s?\.?)\s*\(?(\d{1,2})\)?", re.I)
 
 _TEXT_KINDS = ("narrative", "list_item")
+_NUMISH = re.compile(r"\d|°C|%")
+
+
+def _boiler_re(patterns: tuple[str, ...]) -> re.Pattern:
+    return re.compile("|".join(patterns), re.IGNORECASE)
+
+
+def _scrub(text: str, rx: re.Pattern) -> str:
+    """Drop boilerplate lines, then boilerplate sentences, from a text block."""
+    lines = [ln for ln in text.split("\n") if not rx.search(ln) or len(ln) > 300]
+    out_sents = []
+    for ln in lines:
+        for s_ in _sentences(ln):
+            if not rx.search(s_):
+                out_sents.append(s_)
+    return " ".join(out_sents)
+
+
+def _fake_section(entry: str) -> bool:
+    """Mirror of scientific._fake_heading (same exemptions): table headers,
+    glyph garbage, and front-matter banners must not survive as section-path
+    entries even if extraction let them through."""
+    from docparse.scientific import _FRONT_MATTER_HEADING, _fake_heading
+    return bool(_FRONT_MATTER_HEADING.match(entry)) or _fake_heading(entry)
+
+
+def _clean_path(section_path: Iterable[str]) -> list[str]:
+    return [re.sub(r"\s+", " ", p).strip()
+            for p in section_path if p and not _fake_section(p)]
 
 
 def _est_tokens(text: str) -> int:
@@ -126,9 +170,21 @@ def _est_tokens(text: str) -> int:
     return max(1, round(len(_WORD.findall(text)) * 4 / 3))
 
 
-def _sentences(text: str) -> list[str]:
+def _sentences(text: str, max_tokens: int | None = None) -> list[str]:
     parts = [s.strip() for s in _SENT_SPLIT.split(text) if s.strip()]
-    return parts or ([text.strip()] if text.strip() else [])
+    parts = parts or ([text.strip()] if text.strip() else [])
+    if max_tokens is None:
+        return parts
+    out: list[str] = []
+    for p in parts:
+        if _est_tokens(p) <= max_tokens:
+            out.append(p)
+            continue
+        words = _WORD.findall(p)                 # punctuation-free run: word windows
+        step = max(1, int(max_tokens * 3 / 4))   # tokens -> words
+        for i in range(0, len(words), step):
+            out.append(" ".join(words[i:i + step]))
+    return out
 
 
 def _breadcrumb(title: str | None, section_path: Iterable[str], extra: str = "") -> str:
@@ -197,7 +253,7 @@ def _build_section_text_chunks(result: ExtractionResult, cfg: ChunkingConfig,
 
     for el in result.elements:
         if el.kind not in _TEXT_KINDS or not el.text:
-            if el.kind in ("heading", "title"):
+            if el.kind in ("heading", "title") and not el.metadata.get("pseudo_heading"):
                 flush()
             continue
         if el.metadata.get("role") == "references":
@@ -215,8 +271,10 @@ def _build_section_text_chunks(result: ExtractionResult, cfg: ChunkingConfig,
         prev = merged[-1] if merged else None
         tiny = c.token_estimate < cfg.min_tokens
         if (prev is not None and tiny
-                and (prev.section_path == c.section_path or c.token_estimate < 12)
                 and prev.token_estimate + c.token_estimate <= cfg.max_tokens):
+            if prev.section_path != c.section_path:
+                prev.metadata.setdefault("absorbed_sections", []).append(
+                    " > ".join(c.section_path))
             prev.text = f"{prev.text}\n\n{c.text}"
             prev.embed_text = f"{prev.embed_text}\n\n{c.text}"
             prev.element_ids = list(dict.fromkeys(prev.element_ids + c.element_ids))
@@ -228,20 +286,46 @@ def _build_section_text_chunks(result: ExtractionResult, cfg: ChunkingConfig,
             _links_from_text(prev, prev.text)
         else:
             merged.append(c)
-    return merged
+
+    # pass 2: adjacent section chunks below min_section_tokens merge upward when
+    # they share role + top-level section (two-column papers fragment badly)
+    packed: list[Chunk] = []
+    for c in merged:
+        prev = packed[-1] if packed else None
+        same_scope = (prev is not None and prev.role == c.role
+                      and prev.section_path[:1] == c.section_path[:1])
+        if (same_scope
+                and min(prev.token_estimate, c.token_estimate) < cfg.min_section_tokens
+                and prev.token_estimate + c.token_estimate <= cfg.target_tokens):
+            joiner = "\n\n" if prev.section_path != c.section_path else " "
+            prev.text = f"{prev.text}{joiner}{c.text}"
+            prev.embed_text = f"{prev.embed_text}{joiner}{c.text}"
+            prev.element_ids = list(dict.fromkeys(prev.element_ids + c.element_ids))
+            prev.pages = sorted(set(prev.pages) | set(c.pages))
+            prev.citations += [x for x in c.citations if x not in prev.citations]
+            prev.quantities += [x for x in c.quantities if x not in prev.quantities]
+            prev.char_end = c.char_end or prev.char_end
+            prev.token_estimate = _est_tokens(prev.text)
+            _links_from_text(prev, prev.text)
+        else:
+            packed.append(c)
+    return packed
 
 
 def _pack_group(group: list[Element], cfg: ChunkingConfig, ids: _Ids,
                 title: str | None) -> list[Chunk]:
-    section_path = list(group[0].section_path)
+    section_path = _clean_path(group[0].section_path)
     role = group[0].metadata.get("role")
     crumb = _breadcrumb(title, section_path)
 
-    # sentence stream, remembering which element each sentence came from
+    # sentence stream, remembering which element each sentence came from;
+    # boilerplate sentences are dropped here so they never reach an embedding
+    rx = _boiler_re(cfg.boilerplate_patterns)
     stream: list[tuple[str, Element]] = []
     for el in group:
-        for s in _sentences(el.text):
-            stream.append((s, el))
+        for s in _sentences(el.text, max_tokens=cfg.max_tokens):
+            if not rx.search(s):
+                stream.append((s, el))
 
     out: list[Chunk] = []
     buf: list[tuple[str, Element]] = []
@@ -262,18 +346,29 @@ def _pack_group(group: list[Element], cfg: ChunkingConfig, ids: _Ids,
         _collect_meta(c, list(uniq.values()))
         _links_from_text(c, text)
         out.append(c)
-        # sentence-level overlap into the next buffer
+        # sentence-level overlap into the next buffer — but never carry over a
+        # huge piece (word-window splits would then duplicate whole chunks)
         tail = buf[-cfg.overlap_sentences:] if cfg.overlap_sentences else []
+        if sum(_est_tokens(s) for s, _ in tail) > max(1, cfg.target_tokens // 4):
+            tail = []
         buf = list(tail)
         buf_tokens = sum(_est_tokens(s) for s, _ in buf)
 
-    for sent, el in stream:
-        t = _est_tokens(sent)
-        if buf and (buf_tokens + t > cfg.max_tokens
-                    or (buf_tokens >= cfg.target_tokens)):
-            emit()
-        buf.append((sent, el))
-        buf_tokens += t
+    def pieces(sent: str) -> list[str]:
+        if _est_tokens(sent) <= cfg.max_tokens:
+            return [sent]
+        words = sent.split()
+        step = max(1, cfg.target_tokens * 3 // 4)          # words per piece
+        return [" ".join(words[i:i + step]) for i in range(0, len(words), step)]
+
+    for raw_sent, el in stream:
+        for sent in pieces(raw_sent):
+            t = _est_tokens(sent)
+            if buf and (buf_tokens + t > cfg.max_tokens
+                        or (buf_tokens >= cfg.target_tokens)):
+                emit()
+            buf.append((sent, el))
+            buf_tokens += t
     if buf:
         # avoid emitting an overlap-only remainder that duplicates the previous chunk
         if not (out and len(buf) <= cfg.overlap_sentences):
@@ -315,7 +410,7 @@ def _build_claim_chunks(result: ExtractionResult, cfg: ChunkingConfig, ids: _Ids
                   parent_chunk_id=el_to_chunk.get(cl.get("element_id")),
                   metadata={"claim_type": cl.get("type")})
         if el is not None:
-            c.section_path = list(el.section_path)
+            c.section_path = _clean_path(el.section_path)
             c.element_ids = [el.id]
             c.pages = [el.page] if el.page else []
             c.char_start, c.char_end = el.char_start, el.char_end
@@ -350,7 +445,7 @@ def _build_table_chunks(result: ExtractionResult, cfg: ChunkingConfig, ids: _Ids
         summary += f"\nColumns: {cols}. Rows: {len(rows)}."
         sc = Chunk(chunk_id=ids.next("tab"), doc_id=ids.doc_id, chunk_type="table_summary",
                    text=summary, embed_text=f"[{crumb}]\n{summary}",
-                   section_path=list(el.section_path), role=el.metadata.get("role"),
+                   section_path=_clean_path(el.section_path), role=el.metadata.get("role"),
                    token_estimate=_est_tokens(summary), visual_ref=el.visual_ref,
                    metadata={"label": label, "n_rows": len(rows), "columns": header})
         _collect_meta_single(sc, el, captions.get(el.id))
@@ -364,7 +459,7 @@ def _build_table_chunks(result: ExtractionResult, cfg: ChunkingConfig, ids: _Ids
             rc = Chunk(chunk_id=ids.next("tabrows"), doc_id=ids.doc_id,
                        chunk_type="table_row_group", text=body,
                        embed_text=f"[{crumb} rows {gi + 1}-{gi + len(grp)}]\n{body}",
-                       section_path=list(el.section_path), role=el.metadata.get("role"),
+                       section_path=_clean_path(el.section_path), role=el.metadata.get("role"),
                        parent_chunk_id=sc.chunk_id, token_estimate=_est_tokens(body),
                        visual_ref=el.visual_ref,
                        metadata={"label": label, "row_start": gi + 1,
@@ -384,7 +479,7 @@ def _build_table_chunks(result: ExtractionResult, cfg: ChunkingConfig, ids: _Ids
                                      chunk_type="table_fact", text=ft,
                                      embed_text=f"[{crumb}]\n{ft}",
                                      parent_chunk_id=rc.chunk_id,
-                                     section_path=list(el.section_path),
+                                     section_path=_clean_path(el.section_path),
                                      token_estimate=_est_tokens(ft),
                                      metadata={"label": label, **f}))
     return out
@@ -411,6 +506,9 @@ def _build_figure_chunks(result: ExtractionResult, cfg: ChunkingConfig, ids: _Id
             continue
         cap = captions.get(el.id)
         label = el.metadata.get("label") or (cap.metadata.get("label") if cap is not None else None)
+        if not label and cap is not None and cap.text:
+            if (m := re.match(r"\s*(FIGURE|FIG\.?)\s+(\d+)", cap.text, re.I)):
+                label = f"Figure {m.group(2)}"
         name = label or "Figure"
         crumb = _breadcrumb(title, el.section_path, extra=name)
         parts = []
@@ -427,7 +525,7 @@ def _build_figure_chunks(result: ExtractionResult, cfg: ChunkingConfig, ids: _Id
         body = f"{name}.\n" + "\n".join(parts)
         fc = Chunk(chunk_id=ids.next("fig"), doc_id=ids.doc_id, chunk_type="figure",
                    text=body, embed_text=f"[{crumb}]\n{body}",
-                   section_path=list(el.section_path), role=el.metadata.get("role"),
+                   section_path=_clean_path(el.section_path), role=el.metadata.get("role"),
                    token_estimate=_est_tokens(body), visual_ref=el.visual_ref,
                    metadata={"label": label,
                              "figure_type": (el.structured or {}).get("figure_type")
@@ -436,6 +534,8 @@ def _build_figure_chunks(result: ExtractionResult, cfg: ChunkingConfig, ids: _Id
         out.append(fc)
 
         panels = ((el.structured or {}).get("panels") or []) if cfg.emit_figure_panels else []
+        if cfg.emit_figure_panels and not panels and el.text:
+            panels = _panels_from_text(el.text)         # VLM prose, no JSON panels
         for p in panels:
             if not isinstance(p, dict):
                 continue
@@ -447,18 +547,42 @@ def _build_figure_chunks(result: ExtractionResult, cfg: ChunkingConfig, ids: _Id
                 if isinstance(nv, dict):
                     bits.append(f"{nv.get('item', '')}: {nv.get('value', '')}")
             ptext = ". ".join(b for b in bits if b)
-            if _est_tokens(ptext) < 12:
+            if _est_tokens(ptext) < 8:
                 continue                                   # not worth a vector
             out.append(Chunk(chunk_id=ids.next("figpanel"), doc_id=ids.doc_id,
                              chunk_type="figure_panel", text=ptext,
                              embed_text=f"[{crumb} panel {p.get('id', '?')}]\n{ptext}",
                              parent_chunk_id=fc.chunk_id,
-                             section_path=list(el.section_path),
+                             section_path=_clean_path(el.section_path),
                              pages=[el.page] if el.page else [],
                              visual_ref=el.visual_ref,
                              token_estimate=_est_tokens(ptext),
                              metadata={"label": label, "panel": p.get("id")}))
     return out
+
+
+_PANEL_MARK = re.compile(
+    r"(?:\bpanels?\s+\(?([A-Ha-h])\)?\b[:.]?|(?:^|[.;]\s+)\(([a-hA-H])\)\s)", re.I)
+
+
+def _panels_from_text(desc: str) -> list[dict]:
+    """Synthesize panel dicts from a prose figure description ("Panel A shows
+    ..., (b) the change at 1.5°C, ...") when the VLM returned no JSON panels.
+    Requires at least two distinct markers to avoid false positives."""
+    hits = [(m.start(), (m.group(1) or m.group(2)).upper())
+            for m in _PANEL_MARK.finditer(desc)]
+    dedup: list[tuple[int, str]] = []
+    for pos, pid in hits:
+        if not any(p == pid for _, p in dedup):
+            dedup.append((pos, pid))
+    if len(dedup) < 2:
+        return []
+    panels = []
+    for i, (pos, pid) in enumerate(dedup):
+        end = dedup[i + 1][0] if i + 1 < len(dedup) else len(desc)
+        seg = desc[pos:end].strip().rstrip(";,")
+        panels.append({"id": pid, "takeaway": seg[:400]})
+    return panels
 
 
 def _build_formula_chunks(result: ExtractionResult, ids: _Ids, title: str | None) -> list[Chunk]:
@@ -481,7 +605,7 @@ def _build_formula_chunks(result: ExtractionResult, ids: _Ids, title: str | None
         crumb = _breadcrumb(title, el.section_path, extra=name)
         c = Chunk(chunk_id=ids.next("eq"), doc_id=ids.doc_id, chunk_type="formula",
                   text=body, embed_text=f"[{crumb}]\n{body}",
-                  section_path=list(el.section_path), role=el.metadata.get("role"),
+                  section_path=_clean_path(el.section_path), role=el.metadata.get("role"),
                   token_estimate=_est_tokens(body),
                   metadata={"equation_number": num, "expression": s.get("expression")})
         _collect_meta(c, [el])
@@ -512,13 +636,31 @@ def _build_summary_chunks(result: ExtractionResult, cfg: ChunkingConfig, ids: _I
                           title: str | None) -> list[Chunk]:
     out = []
     for role in cfg.summary_roles:
-        els = [e for e in result.elements
-               if e.kind in _TEXT_KINDS and e.metadata.get("role") == role and e.text]
+        # first CONTIGUOUS run of this role only — if role propagation ever
+        # leaks (bad heading detection), the summary must not absorb the paper
+        els, in_run, seen = [], False, False
+        for e in result.elements:
+            if e.kind in _TEXT_KINDS and e.metadata.get("role") == role and e.text:
+                if seen and not in_run:
+                    break
+                in_run = seen = True
+                els.append(e)
+            else:
+                in_run = False
         if not els:
             continue
-        text = "\n".join(e.text for e in els)
+        rx = _boiler_re(cfg.boilerplate_patterns)
+        text = "\n".join(_scrub(e.text, rx) for e in els)
+        text = "\n".join(ln for ln in text.split("\n") if ln.strip())
         if _est_tokens(text) < cfg.min_tokens:
             continue                                    # role misfire / fragment
+        if _est_tokens(text) > cfg.summary_max_tokens:  # cap at sentence boundary
+            kept: list[str] = []
+            for s_ in _sentences(text):
+                if _est_tokens(" ".join(kept + [s_])) > cfg.summary_max_tokens:
+                    break
+                kept.append(s_)
+            text = " ".join(kept)
         crumb = _breadcrumb(title, [], extra=role)
         c = Chunk(chunk_id=ids.next("sum"), doc_id=ids.doc_id, chunk_type="summary",
                   text=text, embed_text=f"[{crumb}]\n{text}", role=role,
@@ -572,11 +714,20 @@ def chunk_result(result: ExtractionResult, cfg: ChunkingConfig | None = None,
     if orphans:
         cr.warnings.append(f"{len(orphans)} text element(s) not covered by any chunk")
     toks_sorted = sorted(toks) or [0]
+    by_type_tokens: dict[str, list[int]] = {}
+    for c in cr.chunks:
+        by_type_tokens.setdefault(c.chunk_type, []).append(c.token_estimate)
+    tokens_by_type = {}
+    for t, xs in sorted(by_type_tokens.items()):
+        xs.sort()
+        tokens_by_type[t] = {"n": len(xs), "min": xs[0],
+                             "median": xs[len(xs) // 2], "max": xs[-1]}
     cr.stats = {
         "n_chunks": len(cr.chunks),
         "by_type": counts,
         "tokens": {"min": toks_sorted[0], "median": toks_sorted[len(toks_sorted) // 2],
                    "max": toks_sorted[-1], "total": sum(toks)},
+        "tokens_by_type": tokens_by_type,
         "doc_title": title,
         "config": {k: v for k, v in asdict(cfg).items()},
     }
