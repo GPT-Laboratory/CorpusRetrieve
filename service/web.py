@@ -33,6 +33,7 @@ JOBS_DIR = Path(
         str(Path(tempfile.gettempdir()) / "corpusretrieve" / "jobs"),
     )
 )
+
 EMBEDDER = os.environ.get("EMBEDDER", "hash")
 JOBS_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -153,21 +154,34 @@ def get_chunks(job_id: str):
 @app.get("/api/jobs/{job_id}/graph")
 def get_graph(job_id: str, hide: str | None = "VectorPoint,Quantity,Unit,TableKV"):
     """KG nodes/edges for in-browser visualization. `hide` drops bookkeeping
-    node types by default to keep the graph readable."""
+    node types by default to keep the graph readable. Nodes carry degree and
+    full attributes so the explorer can inspect any node without another call."""
     data = _read_json(job_id, "knowledge_graph.json")
-    hidden = set((hide or "").split(",")) if hide else set()
+    hidden = set(x for x in (hide or "").split(",") if x) if hide else set()
     keep = {n["id"] for n in data["nodes"] if n.get("ntype") not in hidden}
-    nodes = [{"id": n["id"], "type": n.get("ntype"),
-              "label": (n.get("label") or n.get("title") or n.get("name")
-                        or n.get("citation_key") or n["id"].split(":")[-1]),
-              "role": n.get("role"), "text": (n.get("text") or "")[:200]}
-             for n in data["nodes"] if n["id"] in keep]
     edges = [{"source": e["source"], "target": e["target"], "rel": e.get("rel")}
              for e in data["edges"]
              if e["source"] in keep and e["target"] in keep]
+    degree: dict[str, int] = {}
+    for e in edges:
+        degree[e["source"]] = degree.get(e["source"], 0) + 1
+        degree[e["target"]] = degree.get(e["target"], 0) + 1
+    nodes = [{"id": n["id"], "type": n.get("ntype"),
+              "label": (n.get("label") or n.get("title") or n.get("name")
+                        or n.get("citation_key") or n["id"].split(":")[-1]),
+              "role": n.get("role"), "text": (n.get("text") or "")[:280],
+              "pages": n.get("pages"), "degree": degree.get(n["id"], 0),
+              "attrs": {k: v for k, v in n.items()
+                        if k not in ("id", "ntype", "text") and v not in (None, "", [])}}
+             for n in data["nodes"] if n["id"] in keep]
+    # all types present in the full graph (so the UI can offer show/hide toggles)
+    all_types: dict[str, int] = {}
+    for n in data["nodes"]:
+        t = n.get("ntype", "?")
+        all_types[t] = all_types.get(t, 0) + 1
     return {"nodes": nodes, "edges": edges,
-            "hidden_types": sorted(hidden), "n_nodes": len(nodes),
-            "n_edges": len(edges)}
+            "hidden_types": sorted(hidden), "all_types": all_types,
+            "n_nodes": len(nodes), "n_edges": len(edges)}
 
 
 # --------------------------------------------------------------------- images

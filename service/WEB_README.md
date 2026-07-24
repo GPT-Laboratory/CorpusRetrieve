@@ -1,11 +1,20 @@
-# CorpusRetrieve Web — Stage 1 (developer mode)
+# CorpusRetrieve Web — the glass-box evidence layer
 
-A web front-end over the evidence pipeline: **upload a document → watch it flow
-through all six stages live → inspect any chunk's source region → download
-portable chunks + embeddings + knowledge graph** to load into your own stack.
+**Vendor-neutral. Portable chunks + embeddings + knowledge graph.**
 
-This is Stage 1 of the rollout: the developer/inspection mode. It validates the
-core wedge — full-pipeline transparency + vendor-neutral portable artifacts.
+Upload a document and watch it become retrievable, grounded evidence — with
+nothing locked to us. Two modes serve two audiences from the same run:
+
+- **Explain mode** (non-technical / demo): a plain-language, step-by-step
+  walkthrough of what happened to *your* document at each of the six stages,
+  ending in one-click downloads. Designed so a non-technical user can explain,
+  in their own words, what each stage does after a single walkthrough.
+- **Inspect mode** (developer / debugging): the full pipeline spine with live
+  timings, the source document with bounding-box provenance overlays, a
+  typed-chunk map, an interactive knowledge-graph explorer, per-chunk
+  inspection, and portable-artifact downloads with copy-paste load snippets.
+
+The mode toggle is persistent (remembered across sessions).
 
 ## Run
 ```
@@ -21,18 +30,23 @@ Open http://localhost:8000
 
 ## What you can do
 1. **Upload** a PDF (or DOCX/HTML/XLSX/CSV/JSON/image/text) — drag-drop or button.
-2. **Watch the six-stage spine** stream live over SSE: parse → extract → enrich
-   → chunk → embed → graph, each showing counts and timing.
-3. **Inspect chunks** (left): filter by type; click one to select it.
-4. **Trace provenance** (center): the selected chunk jumps to its source page and
-   highlights the exact regions it came from, drawn as bounding boxes over the
-   rendered page. Click any box to inspect that element.
-5. **Read metadata** (right): chunk id, role, section path, pages, char span,
-   source element ids, full text.
-6. **Download portable artifacts**: chunks.json, embeddings.jsonl
-   (`{id, vector, sparse, payload}` — loads into any vector DB), and the KG as
-   JSON / Cypher / GraphML. Copy-paste load snippets for Qdrant / Neo4j / pgvector
-   are shown inline.
+2. **Choose your view** with the persistent Explain ↔ Inspect toggle.
+3. **Explain mode**: read the six-stage plain-language walkthrough of your
+   document, then download the results (chunks / embeddings / graph).
+4. **Inspect mode** gives you all of:
+   - the six-stage spine streaming live over SSE with counts + timing;
+   - **Source**: the rendered page with bounding-box provenance overlays —
+     click a chunk to jump to and highlight its exact source region;
+   - **Typed-chunk map**: every chunk as a colored span (color = type, width ∝
+     tokens), metadata on hover, click to open in the source view;
+   - **Knowledge graph**: an interactive Sigma.js explorer — click any node to
+     inspect it and its relationships, toggle node types via the legend, dim to
+     a selected chunk's neighbourhood, and export PNG / JSON / Cypher;
+   - **Inspector**: chunk id, role, section path, pages, char span, source
+     element ids, full text;
+   - **Portable artifacts**: chunks.json, embeddings.jsonl, and the KG as
+     JSON / Cypher / GraphML, with copy-paste load snippets for Qdrant / Neo4j /
+     pgvector.
 
 ## API (also usable headless)
 ```

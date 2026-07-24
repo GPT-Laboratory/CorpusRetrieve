@@ -174,3 +174,27 @@ def test_benchmark_cypher_is_valid_line_per_statement(client, finished_job):
                 n += 1
             i += 1
         assert n % 2 == 0
+
+
+# ---- Stage 2: enriched graph endpoint for the Sigma explorer ---------------
+
+def test_graph_nodes_have_degree_and_attrs(client, finished_job):
+    job, _ = finished_job
+    g = client.get(f"/api/jobs/{job}/graph").json()
+    assert g["n_nodes"] > 0
+    # every node carries degree + type + label for the explorer/inspector
+    for n in g["nodes"][:20]:
+        assert "degree" in n and "type" in n and "label" in n
+    # at least one node is connected (degree > 0)
+    assert any(n["degree"] > 0 for n in g["nodes"])
+    # all_types census present for legend toggles
+    assert isinstance(g.get("all_types"), dict) and g["all_types"]
+
+
+def test_graph_hide_param_filters_types(client, finished_job):
+    job, _ = finished_job
+    full = client.get(f"/api/jobs/{job}/graph", params={"hide": ""}).json()
+    hidden = client.get(f"/api/jobs/{job}/graph").json()  # default hides bookkeeping
+    assert full["n_nodes"] >= hidden["n_nodes"]
+    types_hidden = {n["type"] for n in hidden["nodes"]}
+    assert "VectorPoint" not in types_hidden

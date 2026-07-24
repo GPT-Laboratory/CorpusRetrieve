@@ -6,6 +6,8 @@
 <title>CorpusRetrieve — developer mode</title>
 <script src="/static/vendor/react.production.min.js"></script>
 <script src="/static/vendor/react-dom.production.min.js"></script>
+<script src="/static/vendor/graphology.umd.min.js"></script>
+<script src="/static/vendor/sigma.min.js"></script>
 <script src="/static/vendor/babel.min.js"></script>
 <style>
   :root{
@@ -99,6 +101,41 @@
   .filt .f.on{border-color:var(--teal);color:var(--teal)}
   .drop{margin:40px;border:2px dashed var(--border);border-radius:12px;padding:60px;text-align:center;color:var(--faint)}
   .drop.hot{border-color:var(--teal);color:var(--teal)}
+
+  /* Stage 2: mode toggle */
+  .modeswitch{display:flex;gap:0;border:1px solid var(--border);border-radius:20px;overflow:hidden}
+  .modeswitch button{background:transparent;border:none;color:var(--dim);padding:5px 14px;cursor:pointer;font-size:12px}
+  .modeswitch button.on{background:var(--teal);color:#04211d;font-weight:600}
+  /* Stage 2: sigma graph */
+  #sigma{width:100%;height:620px;background:#0a0e14;border:1px solid var(--border);border-radius:8px}
+  .glegend{display:flex;flex-wrap:wrap;gap:8px;padding:6px 0}
+  .glegend .lg{font-size:10px;font-family:var(--mono);cursor:pointer;opacity:1}
+  .glegend .lg.off{opacity:.35;text-decoration:line-through}
+  .gnode-card{background:var(--panel2);border:1px solid var(--border);border-radius:8px;padding:12px;margin-top:8px}
+  .gbtn{font-size:11px;border:1px solid var(--border);padding:4px 10px;border-radius:5px;background:var(--panel2);color:var(--teal);cursor:pointer}
+  .gbtn:hover{border-color:var(--teal)}
+  /* Stage 2: typed-chunk span map */
+  .spanmap{padding:10px 14px;line-height:2.1}
+  .span{padding:2px 3px;border-radius:3px;cursor:pointer;transition:.1s;border-bottom:2px solid transparent}
+  .span:hover{filter:brightness(1.35)}
+  .span.sel{outline:2px solid var(--teal);outline-offset:1px}
+  .spantip{position:fixed;z-index:50;background:#0a0e14;border:1px solid var(--teal);border-radius:6px;padding:8px 10px;font-size:11px;font-family:var(--mono);color:var(--ink);max-width:320px;pointer-events:none;box-shadow:0 4px 20px rgba(0,0,0,.6)}
+  /* Stage 2: simple-mode guided explainer */
+  .simple{max-width:1000px;margin:0 auto;padding:24px}
+  .sstep{display:flex;gap:18px;padding:20px;border:1px solid var(--border);border-radius:12px;margin-bottom:16px;background:var(--panel2);align-items:flex-start}
+  .sstep .icon{width:44px;height:44px;border-radius:10px;display:flex;align-items:center;justify-content:center;font-size:22px;flex-shrink:0}
+  .sstep h3{margin:0 0 4px;font-size:16px}
+  .sstep p{margin:0;color:var(--dim);font-size:14px;line-height:1.6}
+  .sstep .plain{color:var(--ink)}
+  .sstep .nums{margin-top:8px;font-family:var(--mono);font-size:12px;color:var(--teal)}
+  .sbanner{text-align:center;padding:24px 20px 8px}
+  .sbanner h2{font-size:22px;margin:0 0 6px;color:var(--ink);letter-spacing:0}
+  .sbanner p{color:var(--dim);margin:0;font-size:14px}
+  .sdl{display:flex;gap:10px;justify-content:center;flex-wrap:wrap;margin:18px 0 8px}
+  .sdl a{text-decoration:none;background:var(--panel2);border:1px solid var(--border);border-radius:8px;padding:10px 16px;color:var(--ink);font-size:13px}
+  .sdl a:hover{border-color:var(--teal)}
+  .sdl a .cap{display:block;font-size:11px;color:var(--faint);margin-top:2px}
+  .sarrow{text-align:center;color:var(--faint);font-size:18px;margin:-8px 0}
 </style>
 </head>
 <body>
@@ -113,194 +150,245 @@ const TYPE_COLORS = {
   formula:"#fbbf24", reference:"#9ca3af", summary:"#fb7185",
   heading:"#60a5fa", narrative:"#7dd3fc", caption:"#34d399", title:"#f472b6"
 };
+const NODE_COLORS = {Paper:"#e63946",Section:"#457b9d",Chunk:"#a8dadc",Claim:"#f59e0b",
+  Figure:"#34d399",FigurePanel:"#6ee7b7",Table:"#a78bfa",TableRowGroup:"#c084fc",
+  Formula:"#fbbf24",ReferenceWork:"#9ca3af",Quantity:"#cdb4db",Unit:"#ffc8dd",
+  Entity:"#bde0fe",VectorPoint:"#dee2e6",TableKV:"#e0afa0"};
 const col = t => TYPE_COLORS[t] || "#9aa4b2";
+const ncol = t => NODE_COLORS[t] || "#8899a6";
+
+// plain-language descriptions for simple mode
+const STAGE_INFO = {
+  parse:  {icon:"📄", color:"#60a5fa", title:"1 · Read the document",
+    plain:"We open your file and figure out what kind it is (PDF, Word, spreadsheet…), then read every page — including scanned pages, using OCR when needed.",
+    d:d=>`Detected a ${d.doc_type||"document"} with ${d.pages||"?"} page(s).`},
+  extract:{icon:"🔍", color:"#34d399", title:"2 · Find the pieces",
+    plain:"We locate every distinct piece on the page — headings, paragraphs, tables, figures, captions, formulas — and remember exactly where each one sits, so anything can be traced back to its spot in the original.",
+    d:d=>`Found ${d.elements} pieces (${Object.entries(d.by_kind||{}).slice(0,4).map(([k,v])=>`${v} ${k}`).join(", ")}…).`},
+  enrich: {icon:"🏷️", color:"#f59e0b", title:"3 · Understand the pieces",
+    plain:"We label what each piece is for — is this the methods section? a result? a claim backed by evidence? — and pull out numbers, citations, and (optionally) descriptions of figures written by a vision model.",
+    d:d=>`Labelled roles, found ${d.claims||0} claim(s) and ${d.citations||0} citation link(s)${d.vlm==="claude"?`, described ${d.figures_described}/${d.figures_total} figures`:""}.`},
+  chunk:  {icon:"✂️", color:"#a78bfa", title:"4 · Cut into smart pieces",
+    plain:"We split the document into retrieval-sized “chunks” — but along meaningful boundaries (a whole claim, a table row-group, a figure) rather than arbitrary character counts, so each chunk stands on its own.",
+    d:d=>`Created ${d.chunks} typed chunks (${Object.entries(d.by_type||{}).slice(0,3).map(([k,v])=>`${v} ${k}`).join(", ")}…).`},
+  embed:  {icon:"🔢", color:"#7dd3fc", title:"5 · Turn text into numbers",
+    plain:"Each chunk is converted into a list of numbers (a “vector”) that captures its meaning, so a computer can later find chunks by similarity — this is what makes search work.",
+    d:d=>`Made ${d.vectors} vectors (${d.dim}-dimensional, ${d.model}).`},
+  graph:  {icon:"🕸️", color:"#fb7185", title:"6 · Connect the dots",
+    plain:"We build a map of how everything relates — which claim is backed by which figure, which chunk sits in which section, what cites what — so relationships are explicit, not guessed.",
+    d:d=>`Built a knowledge graph with ${d.nodes} nodes and ${d.edges} connections.`},
+};
 
 function Pill({t}){return <span className="pill" style={{background:col(t)+"22",color:col(t),border:"1px solid "+col(t)+"55"}}>{t}</span>;}
 
 function App(){
   const [job,setJob]=useState(null);
-  const [stages,setStages]=useState([]);      // {stage,status,elapsed_ms,detail}
+  const [stages,setStages]=useState([]);
   const [manifest,setManifest]=useState(null);
   const [chunks,setChunks]=useState([]);
-  const [sel,setSel]=useState(null);          // selected chunk
-  const [elements,setElements]=useState({});  // page -> {page_dims, elements}
+  const [sel,setSel]=useState(null);
+  const [elements,setElements]=useState({});
   const [page,setPage]=useState(1);
-  const [hiEls,setHiEls]=useState([]);        // element ids to highlight
+  const [hiEls,setHiEls]=useState([]);
   const [dropHot,setDropHot]=useState(false);
   const [typeFilter,setTypeFilter]=useState(null);
   const [dlTab,setDlTab]=useState("qdrant");
-  const [centerView,setCenterView]=useState("source");  // source | graph
-  const [graph,setGraph]=useState(null);      // {nodes,edges}
+  const [centerView,setCenterView]=useState("source"); // source | graph | chunks
+  const [graph,setGraph]=useState(null);
   const [useVlm,setUseVlm]=useState(false);
+  const [mode,setMode]=useState(()=>{try{return localStorage.getItem("cr_mode")||"advanced";}catch(e){return "advanced";}});
   const fileRef=useRef();
 
-  const stageState = (name) => {
-    const evs = stages.filter(s=>s.stage===name);
-    if(!evs.length) return {status:"pending"};
-    return evs[evs.length-1];
-  };
+  useEffect(()=>{ try{localStorage.setItem("cr_mode",mode);}catch(e){} },[mode]);
+
+  const stageState=name=>{const e=stages.filter(s=>s.stage===name);return e.length?e[e.length-1]:{status:"pending"};};
 
   async function upload(file){
     setStages([]);setManifest(null);setChunks([]);setSel(null);setElements({});setHiEls([]);setGraph(null);setCenterView("source");
-    const fd=new FormData(); fd.append("file",file);
+    const fd=new FormData();fd.append("file",file);
     const r=await fetch(API+"/api/jobs",{method:"POST",body:fd});
-    const j=await r.json(); setJob(j.job_id);
-    stream(j.job_id);
+    const j=await r.json();setJob(j.job_id);stream(j.job_id);
   }
-
   function stream(jobId){
     const es=new EventSource(API+`/api/jobs/${jobId}/stream?describe_figures=${useVlm?1:0}`);
-    // queue stage events and release them with a minimum visible dwell so the
-    // pipeline reads as a progression rather than a jump (stages run in ms).
-    const queue=[]; let draining=false;
-    const drain=()=>{
-      if(draining||!queue.length) return;
-      draining=true;
-      const d=queue.shift();
-      setStages(prev=>[...prev,d]);
-      const dwell = d.status==="started" ? 420 : 260;
-      setTimeout(()=>{draining=false;drain();}, dwell);
-    };
-    es.addEventListener("stage",e=>{ queue.push(JSON.parse(e.data)); drain(); });
-    es.addEventListener("manifest",e=>{ setManifest(JSON.parse(e.data)); });
-    es.addEventListener("done",()=>{ es.close();
-      const wait=()=>{ if(queue.length||draining){setTimeout(wait,200);return;} loadResults(jobId); };
-      wait();
-    });
-    es.addEventListener("error",e=>{ es.close(); });
+    const queue=[];let draining=false;
+    const drain=()=>{if(draining||!queue.length)return;draining=true;const d=queue.shift();
+      setStages(prev=>[...prev,d]);const dwell=d.status==="started"?420:260;
+      setTimeout(()=>{draining=false;drain();},dwell);};
+    es.addEventListener("stage",e=>{queue.push(JSON.parse(e.data));drain();});
+    es.addEventListener("manifest",e=>{setManifest(JSON.parse(e.data));});
+    es.addEventListener("done",()=>{es.close();const w=()=>{if(queue.length||draining){setTimeout(w,200);return;}loadResults(jobId);};w();});
+    es.addEventListener("error",e=>{es.close();});
   }
-
   async function loadResults(jobId){
     const ch=await (await fetch(API+`/api/jobs/${jobId}/chunks`)).json();
-    setChunks(ch.chunks||[]);
-    loadPage(jobId,1);
+    setChunks(ch.chunks||[]);loadPage(jobId,1);
     fetch(API+`/api/jobs/${jobId}/graph`).then(r=>r.json()).then(setGraph).catch(()=>{});
   }
   async function loadPage(jobId,p){
-    if(elements[p]) {setPage(p);return;}
+    setPage(p);let have=false;setElements(prev=>{have=!!prev[p];return prev;});
+    if(have)return;
     const e=await (await fetch(API+`/api/jobs/${jobId}/elements?page=${p}`)).json();
-    setElements(prev=>({...prev,[p]:e})); setPage(p);
+    setElements(prev=>({...prev,[p]:e}));
   }
+  function selectChunk(c){setSel(c);setHiEls(c.element_ids||[]);if(c.pages&&c.pages.length)loadPage(job,c.pages[0]);}
 
-  function selectChunk(c){
-    setSel(c);
-    setHiEls(c.element_ids||[]);
-    if(c.pages && c.pages.length) loadPage(job,c.pages[0]);
-  }
+  const pageData=elements[page];
+  const dims=pageData&&pageData.page_dims&&pageData.page_dims[String(page)];
+  const filtered=typeFilter?chunks.filter(c=>c.chunk_type===typeFilter):chunks;
+  const chunkTypes=[...new Set(chunks.map(c=>c.chunk_type))];
+  const dl=art=>API+`/api/jobs/${job}/download/${art}`;
 
-  const pageData = elements[page];
-  const dims = pageData && pageData.page_dims && pageData.page_dims[String(page)];
-
-  const filtered = typeFilter ? chunks.filter(c=>c.chunk_type===typeFilter) : chunks;
-  const chunkTypes = [...new Set(chunks.map(c=>c.chunk_type))];
-
-  const snippets = {
+  const snippets={
     qdrant:`# load embeddings.jsonl into Qdrant\nimport json, qdrant_client as q\nfrom qdrant_client import models as m\nc=q.QdrantClient(":memory:")\nrecs=[json.loads(l) for l in open("embeddings.jsonl")]\ndim=len(recs[0]["vector"])\nfor coll in set(r["collection"] for r in recs):\n    c.recreate_collection(coll,\n      vectors_config=m.VectorParams(size=dim,distance=m.Distance.COSINE))\nfor r in recs:\n    c.upsert(r["collection"], points=[m.PointStruct(\n        id=r["id"], vector=r["vector"], payload=r["payload"])])`,
-    neo4j:`// load knowledge_graph.cypher into Neo4j\n// (already MERGE-based & idempotent)\ncypher-shell -u neo4j -p <pw> < knowledge_graph.cypher\n\n// or from python:\nfrom neo4j import GraphDatabase\nd=GraphDatabase.driver("bolt://localhost:7687",auth=("neo4j","pw"))\nwith d.session() as s:\n  for stmt in open("knowledge_graph.cypher").read().split(";"):\n    if stmt.strip(): s.run(stmt)`,
-    pgvector:`-- load embeddings.jsonl into Postgres/pgvector\nCREATE EXTENSION IF NOT EXISTS vector;\nCREATE TABLE chunks(id text primary key,\n  embedding vector(512), payload jsonb);\n-- then COPY / INSERT each record's vector + payload`
+    neo4j:`// load knowledge_graph.cypher into Neo4j (idempotent MERGE)\ncypher-shell -u neo4j -p <pw> < knowledge_graph.cypher`,
+    pgvector:`-- load embeddings.jsonl into Postgres/pgvector\nCREATE EXTENSION IF NOT EXISTS vector;\nCREATE TABLE chunks(id text primary key,\n  embedding vector(512), payload jsonb);`
   };
 
-  return (
-  <div className="app">
+  // ---- header (shared) ----
+  const header = (
     <header>
       <h1>CorpusRetrieve</h1>
-      <span className="tag">developer mode</span>
-      <span className="sub">documents → retrievable, grounded, portable evidence</span>
+      <span className="tag">glass-box evidence layer</span>
+      <span className="sub">vendor-neutral · portable chunks + embeddings + KG</span>
       <div className="upload">
         {manifest && <span className="sub" style={{fontFamily:"var(--mono)",fontSize:11}}>
           {manifest.summary.pages}p · {manifest.summary.elements} elts · {manifest.summary.chunks} chunks · {manifest.summary.vectors} vec · {manifest.summary.graph_nodes} nodes</span>}
+        <div className="modeswitch">
+          <button className={mode==="simple"?"on":""} onClick={()=>setMode("simple")}>Explain</button>
+          <button className={mode==="advanced"?"on":""} onClick={()=>setMode("advanced")}>Inspect</button>
+        </div>
         <input ref={fileRef} type="file" style={{display:"none"}}
           accept=".pdf,.docx,.html,.htm,.csv,.xlsx,.json,.txt,.png,.jpg,.jpeg"
           onChange={e=>e.target.files[0]&&upload(e.target.files[0])}/>
-        <label style={{fontSize:11,color:"var(--dim)",display:"flex",alignItems:"center",gap:5,cursor:"pointer"}}
-          title="Describe figures with a vision model (Claude). Needs ANTHROPIC_API_KEY; adds latency & API cost.">
-          <input type="checkbox" checked={useVlm} onChange={e=>setUseVlm(e.target.checked)}/>
-          describe figures (VLM)
-        </label>
+        {mode==="advanced" && <label style={{fontSize:11,color:"var(--dim)",display:"flex",alignItems:"center",gap:5,cursor:"pointer"}}
+          title="Describe figures with a vision model (Claude). Needs ANTHROPIC_API_KEY; adds latency & cost.">
+          <input type="checkbox" checked={useVlm} onChange={e=>setUseVlm(e.target.checked)}/>describe figures (VLM)</label>}
         <button className="btn primary" onClick={()=>fileRef.current.click()}>Upload document</button>
       </div>
-    </header>
+    </header>);
 
-    {/* six-stage spine */}
+  const dropZone = (
+    <div className={"drop"+(dropHot?" hot":"")}
+      onDragOver={e=>{e.preventDefault();setDropHot(true);}}
+      onDragLeave={()=>setDropHot(false)}
+      onDrop={e=>{e.preventDefault();setDropHot(false);if(e.dataTransfer.files[0])upload(e.dataTransfer.files[0]);}}>
+      <div style={{fontSize:16,marginBottom:8}}>Drop a document here, or use “Upload document”.</div>
+      <div>PDF · DOCX · HTML · XLSX · CSV · JSON · images · text<br/>
+      {mode==="simple"
+        ? <>Watch, in plain language, how your document becomes searchable evidence — then download the results.</>
+        : <>Watch it flow through all six stages, inspect every chunk’s source region,<br/>and download portable chunks + embeddings + knowledge graph.</>}</div>
+    </div>);
+
+  // ============ SIMPLE (EXPLAIN) MODE ============
+  if(mode==="simple"){
+    return (<div className="app">{header}
+      {!job ? dropZone : (
+      <div style={{overflow:"auto"}}>
+        <div className="sbanner">
+          <h2>Here’s what happened to your document</h2>
+          <p>Every step below ran on <b>{manifest?manifest.source:"your file"}</b>. No cloud lock-in — the results are yours to download.</p>
+        </div>
+        <div className="simple">
+          {["parse","extract","enrich","chunk","embed","graph"].map((name,i)=>{
+            const s=stageState(name),info=STAGE_INFO[name];
+            const active=s.status==="done",running=s.status==="running";
+            return (<div key={name}>
+              <div className="sstep" style={{opacity:active?1:running?0.85:0.45,borderColor:running?info.color:"var(--border)"}}>
+                <div className="icon" style={{background:info.color+"22"}}>{info.icon}</div>
+                <div style={{flex:1}}>
+                  <h3>{info.title} {running&&<span style={{fontSize:11,color:info.color}}>· working…</span>}</h3>
+                  <p className="plain">{info.plain}</p>
+                  {active && <div className="nums">✓ {info.d(s.detail||{})}</div>}
+                </div>
+              </div>
+              {i<5 && <div className="sarrow">↓</div>}
+            </div>);
+          })}
+          {manifest && <>
+            <div className="sbanner" style={{marginTop:20}}>
+              <h2>Take your results anywhere</h2>
+              <p>These files work in any vector database or knowledge-graph tool — nothing is locked to us.</p>
+            </div>
+            <div className="sdl">
+              <a href={dl("chunks")}>📦 Chunks<span className="cap">the smart pieces (JSON)</span></a>
+              <a href={dl("embeddings")}>🔢 Embeddings<span className="cap">the meaning-vectors (JSONL)</span></a>
+              <a href={dl("graph_json")}>🕸️ Knowledge graph<span className="cap">the connections (JSON)</span></a>
+            </div>
+            <div style={{textAlign:"center",marginTop:14}}>
+              <button className="btn" onClick={()=>setMode("advanced")}>Switch to Inspect mode for full detail →</button>
+            </div>
+          </>}
+        </div>
+      </div>)}
+    </div>);
+  }
+
+  // ============ ADVANCED (INSPECT) MODE ============
+  return (
+  <div className="app">{header}
     <div className="spine">
       {["parse","extract","enrich","chunk","embed","graph"].map((name,i)=>{
         const s=stageState(name);
-        return (
-        <div key={name} className={"stage "+ (s.status||"pending")}>
+        return (<div key={name} className={"stage "+(s.status||"pending")}>
           <div className="ms">{s.elapsed_ms!=null?s.elapsed_ms+"ms":""}</div>
-          <div className="num">STAGE {i+1}</div>
-          <div className="name">{name}</div>
+          <div className="num">STAGE {i+1}</div><div className="name">{name}</div>
           <div className="st">{s.status||"pending"}</div>
           {s.detail && <div className="detail">{fmtDetail(name,s.detail)}</div>}
           <div className="bar"></div>
         </div>);
       })}
     </div>
-
-    {!job ? (
-      <div className={"drop"+(dropHot?" hot":"")}
-        onDragOver={e=>{e.preventDefault();setDropHot(true);}}
-        onDragLeave={()=>setDropHot(false)}
-        onDrop={e=>{e.preventDefault();setDropHot(false);if(e.dataTransfer.files[0])upload(e.dataTransfer.files[0]);}}>
-        <div style={{fontSize:16,marginBottom:8}}>Drop a document here, or use “Upload document”.</div>
-        <div>PDF · DOCX · HTML · XLSX · CSV · JSON · images · text<br/>
-        Watch it flow through all six stages, inspect every chunk’s source region,<br/>and download portable chunks + embeddings + knowledge graph.</div>
-      </div>
-    ) : (
+    {!job ? dropZone : (
     <div className="main">
       {/* LEFT: chunks */}
       <div className="col">
         <h2>Chunks {chunks.length?`(${filtered.length})`:""}</h2>
-        {chunkTypes.length>0 &&
-          <div className="filt">
-            <span className={"f"+(!typeFilter?" on":"")} onClick={()=>setTypeFilter(null)}>all</span>
-            {chunkTypes.map(t=><span key={t} className={"f"+(typeFilter===t?" on":"")}
-              style={typeFilter===t?{borderColor:col(t),color:col(t)}:{}}
-              onClick={()=>setTypeFilter(t)}>{t}</span>)}
-          </div>}
+        {chunkTypes.length>0 && <div className="filt">
+          <span className={"f"+(!typeFilter?" on":"")} onClick={()=>setTypeFilter(null)}>all</span>
+          {chunkTypes.map(t=><span key={t} className={"f"+(typeFilter===t?" on":"")}
+            style={typeFilter===t?{borderColor:col(t),color:col(t)}:{}} onClick={()=>setTypeFilter(t)}>{t}</span>)}
+        </div>}
         {filtered.map(c=>(
-          <div key={c.chunk_id} className={"chunk"+(sel&&sel.chunk_id===c.chunk_id?" sel":"")}
-               onClick={()=>selectChunk(c)}>
-            <div className="row"><Pill t={c.chunk_type}/>
-              <span className="cid">{c.chunk_id.split("::").slice(-2).join("::")}</span></div>
+          <div key={c.chunk_id} className={"chunk"+(sel&&sel.chunk_id===c.chunk_id?" sel":"")} onClick={()=>selectChunk(c)}>
+            <div className="row"><Pill t={c.chunk_type}/><span className="cid">{c.chunk_id.split("::").slice(-2).join("::")}</span></div>
             <div className="prev">{c.text.slice(0,140)}</div>
             <div className="meta">{c.pages&&c.pages.length?`p${c.pages.join(",")}`:"—"} · {c.token_estimate||0} tok · {c.element_ids?c.element_ids.length:0} elts{c.section_path&&c.section_path.length?` · ${c.section_path[0]}`:""}</div>
-          </div>
-        ))}
+          </div>))}
         {!chunks.length && <div style={{padding:14,color:"var(--faint)",fontSize:12}}>Chunks appear when the pipeline finishes…</div>}
       </div>
-
-      {/* CENTER: document viewer with bbox overlay */}
+      {/* CENTER: source | chunks | graph */}
       <div className="col viewer">
         <div style={{display:"flex",alignItems:"center",gap:10,padding:"0 14px"}}>
-          <h2 style={{padding:"12px 0 8px"}}>{centerView==="source"?"Source · provenance overlay"+(dims?` · page ${page}`:""):"Knowledge graph"}</h2>
+          <h2 style={{padding:"12px 0 8px"}}>{centerView==="source"?"Source · provenance overlay"+(dims?` · page ${page}`:""):centerView==="chunks"?"Typed-chunk map":"Knowledge graph"}</h2>
           <div style={{marginLeft:"auto",display:"flex",gap:4}}>
-            <span className={"tab"+(centerView==="source"?" on":"")} style={{borderBottom:"1px solid var(--border)",borderRadius:6}} onClick={()=>setCenterView("source")}>source</span>
-            <span className={"tab"+(centerView==="graph"?" on":"")} style={{borderBottom:"1px solid var(--border)",borderRadius:6}} onClick={()=>setCenterView("graph")}>graph{graph?` (${graph.n_nodes})`:""}</span>
+            {["source","chunks","graph"].map(v=>
+              <span key={v} className={"tab"+(centerView===v?" on":"")} style={{borderBottom:"1px solid var(--border)",borderRadius:6}}
+                onClick={()=>setCenterView(v)}>{v==="graph"&&graph?`graph (${graph.n_nodes})`:v}</span>)}
           </div>
         </div>
         {centerView==="graph" ? (
-          graph ? <GraphView graph={graph} sel={sel}/> :
-            <div className="empty">Building knowledge graph…<br/>
-            <span style={{fontSize:11}}>(appears when the pipeline finishes)</span></div>
-        ) : !dims ? (
-          <div className="empty">The rendered page with bounding-box overlays appears here.<br/>
-          Select a chunk on the left to jump to and highlight its source region.<br/>
-          <span style={{fontSize:11}}>(Page rendering requires a PDF source.)</span></div>
-        ) : (
+          graph ? <SigmaGraph graph={graph} sel={sel} dl={dl}/> :
+            <div className="empty">Building knowledge graph…</div>
+        ) : centerView==="chunks" ? (
+          chunks.length ? <SpanMap chunks={chunks} sel={sel} onSel={selectChunk}/> :
+            <div className="empty">The typed-chunk map appears when the pipeline finishes.</div>
+        ) : dims ? (
           <div>
-            <PageOverlay job={job} page={page} dims={dims}
-              elements={pageData.elements} hi={hiEls}
-              onPick={id=>setHiEls([id])}/>
+            <PageOverlay job={job} page={page} dims={dims} elements={pageData.elements} hi={hiEls} onPick={id=>setHiEls([id])}/>
             <div className="pageno">
               <button className="btn" disabled={page<=1} onClick={()=>loadPage(job,page-1)}>‹</button>
               &nbsp; page {page} / {pageData.page_count} &nbsp;
               <button className="btn" disabled={page>=pageData.page_count} onClick={()=>loadPage(job,page+1)}>›</button>
+              &nbsp;·&nbsp; click a chunk to highlight its source region
             </div>
           </div>
+        ) : chunks.length ? (
+          <div className="empty">Loading page…<br/><span style={{fontSize:11}}>If this stays empty, the source may be a non-PDF (page rendering needs a PDF).</span></div>
+        ) : (
+          <div className="empty">The rendered page with bounding-box overlays appears here.<br/>Select a chunk on the left to jump to and highlight its source region.</div>
         )}
       </div>
-
       {/* RIGHT: inspector + downloads */}
       <div className="col">
         <h2>Inspector</h2>
@@ -315,160 +403,195 @@ function App(){
             <div className="k">token estimate</div><div className="v">{sel.token_estimate}</div>
             {sel.char_start!=null&&<><div className="k">char span</div><div className="v">{sel.char_start} – {sel.char_end}</div></>}
             <div className="k">source elements ({sel.element_ids?sel.element_ids.length:0}) — click to highlight</div>
-            <div className="trace">
-              {(sel.element_ids||[]).map(id=><span key={id} className="e"
-                onClick={()=>{setHiEls([id]);}}>{id.slice(0,8)}</span>)}
-            </div>
+            <div className="trace">{(sel.element_ids||[]).map(id=><span key={id} className="e" onClick={()=>setHiEls([id])}>{id.slice(0,8)}</span>)}</div>
             <div className="k">text</div><div className="txt">{sel.text}</div>
           </div>
         ) : <div style={{padding:14,color:"var(--faint)",fontSize:12}}>Select a chunk to inspect its metadata, provenance, and source elements.</div>}
-
         {manifest && <>
           <h2 style={{marginTop:10}}>Portable artifacts</h2>
           <div className="dl">
-            {[
-              ["chunks","chunks.json","typed chunks + provenance"],
+            {[["chunks","chunks.json","typed chunks + provenance"],
               ["embeddings","embeddings.jsonl","{id,vector,payload} — any vector DB"],
               ["graph_json","knowledge_graph.json","nodes + edges"],
               ["graph_cypher","knowledge_graph.cypher","load into Neo4j"],
               ["graph_graphml","knowledge_graph.graphml","Gephi / yEd"],
-              ["extraction","extraction.json","raw elements + bbox"],
-            ].map(([art,nm,ds])=>(
-              <div className="item" key={art}>
-                <span className="nm">{nm}</span><span className="ds">{ds}</span>
-                <a className="get" href={API+`/api/jobs/${job}/download/${art}`}>download</a>
-              </div>
-            ))}
+              ["extraction","extraction.json","raw elements + bbox"]].map(([art,nm,ds])=>(
+              <div className="item" key={art}><span className="nm">{nm}</span><span className="ds">{ds}</span>
+                <a className="get" href={dl(art)}>download</a></div>))}
           </div>
           <h2>Load into your stack</h2>
-          <div className="tabs">
-            {["qdrant","neo4j","pgvector"].map(t=>
-              <span key={t} className={"tab"+(dlTab===t?" on":"")} onClick={()=>setDlTab(t)}>{t}</span>)}
-          </div>
+          <div className="tabs">{["qdrant","neo4j","pgvector"].map(t=>
+            <span key={t} className={"tab"+(dlTab===t?" on":"")} onClick={()=>setDlTab(t)}>{t}</span>)}</div>
           <div className="snippet">{snippets[dlTab]}</div>
         </>}
       </div>
-    </div>
-    )}
+    </div>)}
   </div>);
 }
 
-function GraphView({graph,sel}){
-  const [pos,setPos]=useState(null);
-  const [hover,setHover]=useState(null);
-  const W=760,H=560;
-  const NODE_COLORS={Paper:"#e63946",Section:"#457b9d",Chunk:"#a8dadc",Claim:"#f59e0b",
-    Figure:"#34d399",FigurePanel:"#6ee7b7",Table:"#a78bfa",TableRowGroup:"#c084fc",
-    Formula:"#fbbf24",ReferenceWork:"#9ca3af"};
-  const ncol=t=>NODE_COLORS[t]||"#8899a6";
+// ---------------- Sigma.js knowledge-graph explorer ----------------
+function SigmaGraph({graph,sel,dl}){
+  const ref=useRef(); const rendererRef=useRef(); const graphRef=useRef();
+  const [picked,setPicked]=useState(null);
+  const [off,setOff]=useState(new Set());   // hidden node types (legend toggles)
 
   useEffect(()=>{
-    if(!graph||!graph.nodes.length){setPos(null);return;}
-    const nodes=graph.nodes.map((n,i)=>({...n,
-      x:W/2+Math.cos(i)*120*Math.random()+ (Math.random()-.5)*80,
-      y:H/2+Math.sin(i)*120*Math.random()+ (Math.random()-.5)*80, vx:0,vy:0}));
-    const idx=Object.fromEntries(nodes.map((n,i)=>[n.id,i]));
-    const links=graph.edges.filter(e=>idx[e.source]!=null&&idx[e.target]!=null)
-      .map(e=>({s:idx[e.source],t:idx[e.target],rel:e.rel}));
-    // force sim: repulsion + spring + centering; run fixed iterations then render
-    for(let it=0;it<300;it++){
-      const k=it<150?1:0.5;
-      for(let i=0;i<nodes.length;i++){
-        let fx=0,fy=0;
-        for(let j=0;j<nodes.length;j++){ if(i===j)continue;
-          let dx=nodes[i].x-nodes[j].x, dy=nodes[i].y-nodes[j].y;
-          let d2=dx*dx+dy*dy+0.01, d=Math.sqrt(d2);
-          const rep=1600/d2; fx+=dx/d*rep; fy+=dy/d*rep;
-        }
-        fx+=(W/2-nodes[i].x)*0.008; fy+=(H/2-nodes[i].y)*0.008;
-        nodes[i].vx=(nodes[i].vx+fx)*0.85*k; nodes[i].vy=(nodes[i].vy+fy)*0.85*k;
-      }
-      for(const l of links){
-        const a=nodes[l.s],b=nodes[l.t];
-        let dx=b.x-a.x,dy=b.y-a.y,d=Math.sqrt(dx*dx+dy*dy)+0.01;
-        const spring=(d-70)*0.02;
-        a.vx+=dx/d*spring; a.vy+=dy/d*spring; b.vx-=dx/d*spring; b.vy-=dy/d*spring;
-      }
-      for(const n of nodes){ n.x+=n.vx; n.y+=n.vy;
-        n.x=Math.max(20,Math.min(W-20,n.x)); n.y=Math.max(20,Math.min(H-20,n.y)); }
+    if(!ref.current||!graph) return;
+    const Graph = window.graphology;
+    const SigmaCtor = (window.Sigma && (window.Sigma.Sigma||window.Sigma)) ;
+    if(!Graph||!SigmaCtor){ return; }
+    const g=new Graph();
+    const shown=graph.nodes.filter(n=>!off.has(n.type));
+    const ids=new Set(shown.map(n=>n.id));
+    const N=shown.length;
+    shown.forEach((n,i)=>{
+      const ang=2*Math.PI*i/N, rad=1+ (n.degree||0)*0.04;
+      g.addNode(n.id,{label:String(n.label).slice(0,36),size:Math.max(3,Math.min(14,3+(n.degree||0))),
+        color:ncol(n.type), x:Math.cos(ang)*rad+Math.random()*0.1, y:Math.sin(ang)*rad+Math.random()*0.1,
+        _type:n.type,_role:n.role,_text:n.text,_pages:n.pages,_attrs:n.attrs,_degree:n.degree});
+    });
+    graph.edges.forEach((e,i)=>{ if(ids.has(e.source)&&ids.has(e.target)){
+      try{g.addEdgeWithKey("e"+i,e.source,e.target,{size:0.6,color:"#2b313b",_rel:e.rel});}catch(_){}}});
+    // simple force-ish layout: a few iterations of repulsion+centering
+    const nodes=g.nodes();
+    for(let it=0;it<120;it++){ const k=it<60?1:0.5;
+      nodes.forEach(a=>{ let fx=0,fy=0; const ax=g.getNodeAttribute(a,"x"),ay=g.getNodeAttribute(a,"y");
+        nodes.forEach(b=>{ if(a===b)return; const dx=ax-g.getNodeAttribute(b,"x"),dy=ay-g.getNodeAttribute(b,"y");
+          const d2=dx*dx+dy*dy+0.001; const rep=0.006/d2; fx+=dx*rep; fy+=dy*rep;});
+        fx+=-ax*0.02; fy+=-ay*0.02;
+        g.setNodeAttribute(a,"x",ax+Math.max(-0.5,Math.min(0.5,fx*k)));
+        g.setNodeAttribute(a,"y",ay+Math.max(-0.5,Math.min(0.5,fy*k)));});
+      g.forEachEdge((e,at,s,t)=>{ const sx=g.getNodeAttribute(s,"x"),sy=g.getNodeAttribute(s,"y"),
+        tx=g.getNodeAttribute(t,"x"),ty=g.getNodeAttribute(t,"y"); const dx=tx-sx,dy=ty-sy;
+        g.setNodeAttribute(s,"x",sx+dx*0.01*k); g.setNodeAttribute(s,"y",sy+dy*0.01*k);
+        g.setNodeAttribute(t,"x",tx-dx*0.01*k); g.setNodeAttribute(t,"y",ty-dy*0.01*k);});
     }
-    setPos({nodes,links,idx});
-  },[graph]);
+    if(rendererRef.current){rendererRef.current.kill();rendererRef.current=null;}
+    const r=new SigmaCtor(g,ref.current,{labelRenderedSizeThreshold:8,labelColor:{color:"#9aa4b2"},defaultEdgeColor:"#2b313b"});
+    rendererRef.current=r; graphRef.current=g;
+    // container may have been display:none until this tab opened; make sure the
+    // renderer picks up real dimensions so the mouse layer registers node hits.
+    requestAnimationFrame(()=>{ try{r.resize();r.refresh();}catch(_){} });
+    r.on("clickNode",({node})=>{ const a=g.getNodeAttributes(node);
+      setPicked({id:node,type:a._type,role:a._role,text:a._text,pages:a._pages,attrs:a._attrs,degree:a._degree,
+        neighbors:g.neighbors(node).map(nb=>({id:nb,type:g.getNodeAttribute(nb,"_type"),label:g.getNodeAttribute(nb,"label"),
+          rel:(g.edges(node,nb).concat(g.edges(nb,node))).map(ek=>g.getEdgeAttribute(ek,"_rel"))[0]}))});
+    });
+    r.on("clickStage",()=>setPicked(null));
+    return ()=>{ if(rendererRef.current){rendererRef.current.kill();rendererRef.current=null;} };
+  },[graph,off]);
 
-  if(!pos) return <div className="empty">Laying out graph…</div>;
-  // highlight nodes connected to the selected chunk
-  const selId = sel ? pos.nodes.find(n=>n.id.endsWith("::"+sel.chunk_id.split("::").slice(-2).join("::"))||n.id.endsWith(sel.chunk_id)) : null;
-  const selIdx = selId ? pos.idx[selId.id] : -1;
-  const nbr = new Set();
-  if(selIdx>=0){ pos.links.forEach(l=>{ if(l.s===selIdx)nbr.add(l.t); if(l.t===selIdx)nbr.add(l.s); }); }
+  // highlight neighbourhood of the selected chunk
+  useEffect(()=>{
+    const g=graphRef.current,r=rendererRef.current; if(!g||!r||!sel) return;
+    let target=null; g.forEachNode(n=>{ if(n.endsWith("::"+sel.chunk_id.split("::").slice(-2).join("::"))||n.endsWith(sel.chunk_id)) target=n; });
+    const nbr=new Set(target?[target,...g.neighbors(target)]:[]);
+    g.forEachNode(n=>g.setNodeAttribute(n,"color", target&&!nbr.has(n)?"#2b313b":ncol(g.getNodeAttribute(n,"_type"))));
+    r.refresh();
+  },[sel]);
 
-  const types=[...new Set(pos.nodes.map(n=>n.type))];
-  return (
-   <div style={{padding:"6px 14px"}}>
-     <div style={{display:"flex",flexWrap:"wrap",gap:8,marginBottom:6}}>
-       {types.map(t=><span key={t} style={{fontSize:10,fontFamily:"var(--mono)",color:ncol(t)}}>
-         <span style={{display:"inline-block",width:8,height:8,borderRadius:8,background:ncol(t),marginRight:4}}></span>{t}</span>)}
-     </div>
-     <svg width="100%" viewBox={`0 0 ${W} ${H}`} style={{background:"#0a0e14",borderRadius:8,border:"1px solid var(--border)"}}>
-       {pos.links.map((l,i)=>{
-         const a=pos.nodes[l.s],b=pos.nodes[l.t];
-         const on = selIdx>=0 && (l.s===selIdx||l.t===selIdx);
-         return <line key={i} x1={a.x} y1={a.y} x2={b.x} y2={b.y}
-           stroke={on?"#2dd4bf":"#2b313b"} strokeWidth={on?1.6:0.6} opacity={selIdx>=0&&!on?0.25:0.8}/>;
-       })}
-       {pos.nodes.map((n,i)=>{
-         const dim = selIdx>=0 && i!==selIdx && !nbr.has(i);
-         const r = n.type==="Paper"?9:n.type==="Section"?6:4.2;
-         return <g key={n.id} opacity={dim?0.28:1}
-           onMouseEnter={()=>setHover(n)} onMouseLeave={()=>setHover(null)} style={{cursor:"pointer"}}>
-           <circle cx={n.x} cy={n.y} r={i===selIdx?r+2:r} fill={ncol(n.type)}
-             stroke={i===selIdx?"#fff":"none"} strokeWidth={i===selIdx?1.5:0}/>
-         </g>;
-       })}
-       {hover && <g>
-         <rect x={Math.min(hover.x+8,W-190)} y={Math.max(hover.y-24,4)} width="184" height="34" rx="4" fill="#161b22" stroke="#2b313b"/>
-         <text x={Math.min(hover.x+14,W-184)} y={Math.max(hover.y-10,18)} fill="#e6edf3" fontSize="10" fontFamily="var(--mono)">{hover.type}</text>
-         <text x={Math.min(hover.x+14,W-184)} y={Math.max(hover.y+2,30)} fill="#9aa4b2" fontSize="9" fontFamily="var(--mono)">{(hover.label||"").slice(0,30)}</text>
-       </g>}
-     </svg>
-     <div style={{fontSize:11,color:"var(--faint)",marginTop:6,fontFamily:"var(--mono)"}}>
-       {pos.nodes.length} nodes · {pos.links.length} edges{sel?" · highlighting neighbours of selected chunk":""} · hover a node for detail · full graph downloads as JSON/Cypher/GraphML →
-     </div>
-   </div>);
+  const types=graph?Object.keys(graph.all_types||{}).filter(t=>graph.nodes.some(n=>n.type===t)):[];
+  const exportPng=()=>{ const r=rendererRef.current; if(!r)return;
+    const c=r.getCanvases?r.getCanvases():null;
+    // fallback: composite the sigma canvases
+    const layers=ref.current.querySelectorAll("canvas"); const out=document.createElement("canvas");
+    out.width=ref.current.clientWidth; out.height=ref.current.clientHeight; const ctx=out.getContext("2d");
+    ctx.fillStyle="#0a0e14"; ctx.fillRect(0,0,out.width,out.height);
+    layers.forEach(cv=>ctx.drawImage(cv,0,0,out.width,out.height));
+    const a=document.createElement("a"); a.href=out.toDataURL("image/png"); a.download="knowledge_graph.png"; a.click();
+  };
+
+  return (<div style={{padding:"6px 14px"}}>
+    <div className="glegend">
+      {types.map(t=><span key={t} className={"lg"+(off.has(t)?" off":"")} style={{color:ncol(t)}}
+        onClick={()=>setOff(prev=>{const s=new Set(prev);s.has(t)?s.delete(t):s.add(t);return s;})}>
+        <span style={{display:"inline-block",width:8,height:8,borderRadius:8,background:ncol(t),marginRight:4}}></span>{t}</span>)}
+      <span style={{marginLeft:"auto",display:"flex",gap:6}}>
+        <button className="gbtn" onClick={exportPng}>export PNG</button>
+        <a className="gbtn" href={dl("graph_json")}>graph JSON</a>
+        <a className="gbtn" href={dl("graph_cypher")}>Cypher</a>
+      </span>
+    </div>
+    <div id="sigma" ref={ref}></div>
+    {picked ? (
+      <div className="gnode-card">
+        <div style={{display:"flex",alignItems:"center",gap:8}}>
+          <span style={{width:10,height:10,borderRadius:10,background:ncol(picked.type),display:"inline-block"}}></span>
+          <b>{picked.type}</b><span style={{color:"var(--faint)",fontSize:11,fontFamily:"var(--mono)",marginLeft:"auto"}}>{picked.degree} connections</span>
+        </div>
+        <div style={{fontFamily:"var(--mono)",fontSize:11,color:"var(--dim)",margin:"6px 0"}}>{picked.id}</div>
+        {picked.text && <div style={{fontSize:12,color:"var(--dim)",marginBottom:6}}>{picked.text}</div>}
+        {picked.neighbors && picked.neighbors.length>0 && <>
+          <div className="k" style={{fontSize:10,textTransform:"uppercase",color:"var(--faint)"}}>connected to</div>
+          <div style={{display:"flex",flexDirection:"column",gap:3,marginTop:4,maxHeight:150,overflow:"auto"}}>
+            {picked.neighbors.slice(0,12).map((nb,i)=>(
+              <div key={i} style={{fontSize:11,fontFamily:"var(--mono)"}}>
+                <span style={{color:"var(--teal)"}}>{nb.rel||"—"}</span> → <span style={{color:ncol(nb.type)}}>{nb.type}</span> <span style={{color:"var(--dim)"}}>{String(nb.label).slice(0,28)}</span>
+              </div>))}
+          </div></>}
+      </div>
+    ) : <div style={{fontSize:11,color:"var(--faint)",marginTop:6,fontFamily:"var(--mono)"}}>
+      {graph.n_nodes} nodes · {graph.n_edges} edges · click a node to inspect · click a legend type to hide it{sel?" · dimmed to selected chunk’s neighbourhood":""}</div>}
+  </div>);
+}
+
+// ---------------- Typed-chunk span map ----------------
+function SpanMap({chunks,sel,onSel}){
+  const [tip,setTip]=useState(null);
+  // order by first page then char_start so the layout reads like the document
+  const ordered=[...chunks].sort((a,b)=>{
+    const pa=(a.pages&&a.pages[0])||999,pb=(b.pages&&b.pages[0])||999;
+    if(pa!==pb)return pa-pb; return (a.char_start||0)-(b.char_start||0);});
+  const types=[...new Set(chunks.map(c=>c.chunk_type))];
+  return (<div>
+    <div className="glegend" style={{padding:"6px 14px"}}>
+      {types.map(t=><span key={t} className="lg" style={{color:col(t)}}>
+        <span style={{display:"inline-block",width:8,height:8,borderRadius:2,background:col(t),marginRight:4}}></span>{t}</span>)}
+    </div>
+    <div className="spanmap">
+      {ordered.map(c=>{
+        const w=Math.max(30,Math.min(320,(c.token_estimate||20)*1.1));
+        return <span key={c.chunk_id}
+          className={"span"+(sel&&sel.chunk_id===c.chunk_id?" sel":"")}
+          style={{background:col(c.chunk_type)+"33",borderBottom:"2px solid "+col(c.chunk_type),
+                  display:"inline-block",width:w,height:14,verticalAlign:"middle",marginRight:3}}
+          onMouseEnter={e=>setTip({c,x:e.clientX,y:e.clientY})}
+          onMouseMove={e=>setTip({c,x:e.clientX,y:e.clientY})}
+          onMouseLeave={()=>setTip(null)}
+          onClick={()=>onSel(c)}></span>;
+      })}
+    </div>
+    <div style={{fontSize:11,color:"var(--faint)",padding:"4px 14px",fontFamily:"var(--mono)"}}>
+      each bar = one chunk · width ∝ token count · color = type · hover for detail · click to open in source view</div>
+    {tip && <div className="spantip" style={{left:Math.min(tip.x+14,window.innerWidth-340),top:tip.y+14}}>
+      <div><b style={{color:col(tip.c.chunk_type)}}>{tip.c.chunk_type}</b> · {tip.c.token_estimate} tok · {tip.c.pages&&tip.c.pages.length?`p${tip.c.pages.join(",")}`:"—"}</div>
+      {tip.c.section_path&&tip.c.section_path.length>0 && <div style={{color:"var(--dim)",marginTop:3}}>{tip.c.section_path.join(" › ")}</div>}
+      <div style={{color:"var(--dim)",marginTop:3}}>{tip.c.text.slice(0,140)}…</div>
+    </div>}
+  </div>);
 }
 
 function PageOverlay({job,page,dims,elements,hi,onPick}){
-  const [natural,setNatural]=useState(null);   // rendered px size
+  const [natural,setNatural]=useState(null);
   const imgUrl=API+`/api/jobs/${job}/page/${page}.png?dpi=120`;
-  // scale factor: rendered px per PDF point
-  return (
-    <div className="pagewrap">
-      <img src={imgUrl} onLoad={e=>setNatural({w:e.target.clientWidth,h:e.target.clientHeight})}
-           onError={()=>setNatural(null)}/>
-      {natural && elements.filter(e=>e.bbox).map(e=>{
-        const sx=natural.w/dims.width, sy=natural.h/dims.height;
-        const [x0,y0,x1,y1]=e.bbox;
-        const on=hi.includes(e.id);
-        return <div key={e.id}
-          className={"ov"+(on?" hi":"")}
-          title={`${e.kind}${e.role?" · "+e.role:""}\n${(e.text||"").slice(0,120)}`}
-          onClick={()=>onPick(e.id)}
-          style={{left:x0*sx,top:y0*sy,width:(x1-x0)*sx,height:(y1-y0)*sy,
-                  borderColor: on?undefined:col(e.kind)+"88"}}/>;
-      })}
-    </div>
-  );
+  return (<div className="pagewrap">
+    <img src={imgUrl} onLoad={e=>setNatural({w:e.target.clientWidth,h:e.target.clientHeight})} onError={()=>setNatural(null)}/>
+    {natural && elements.filter(e=>e.bbox).map(e=>{
+      const sx=natural.w/dims.width,sy=natural.h/dims.height;const[x0,y0,x1,y1]=e.bbox;const on=hi.includes(e.id);
+      return <div key={e.id} className={"ov"+(on?" hi":"")}
+        title={`${e.kind}${e.role?" · "+e.role:""}\n${(e.text||"").slice(0,120)}`}
+        onClick={()=>onPick(e.id)}
+        style={{left:x0*sx,top:y0*sy,width:(x1-x0)*sx,height:(y1-y0)*sy,borderColor:on?undefined:col(e.kind)+"88"}}/>;
+    })}
+  </div>);
 }
 
 function fmtDetail(stage,d){
   if(stage==="parse") return `${d.doc_type||""} · ${d.pages||"?"}p · ${d.backend||""}`;
   if(stage==="extract") return `${d.elements} elements · ${d.with_bbox} with bbox\n`+Object.entries(d.by_kind||{}).map(([k,v])=>`${k}:${v}`).join(" ");
-  if(stage==="enrich"){
-    let base=`claims:${d.claims} · cites:${d.citations}\n`+Object.entries(d.roles||{}).map(([k,v])=>`${k}:${v}`).join(" ");
-    if(d.vlm==="claude") base+=`\nVLM: described ${d.figures_described}/${d.figures_total} figures`;
-    else if(d.vlm==="skipped") base+=`\nVLM skipped: ${(d.reason||"").slice(0,60)}`;
-    return base;
-  }
+  if(stage==="enrich"){let b=`claims:${d.claims} · cites:${d.citations}\n`+Object.entries(d.roles||{}).map(([k,v])=>`${k}:${v}`).join(" ");
+    if(d.vlm==="claude")b+=`\nVLM: described ${d.figures_described}/${d.figures_total} figures`;
+    else if(d.vlm==="skipped")b+=`\nVLM skipped: ${(d.reason||"").slice(0,60)}`;return b;}
   if(stage==="chunk") return `${d.chunks} chunks\n`+Object.entries(d.by_type||{}).map(([k,v])=>`${k}:${v}`).join(" ");
   if(stage==="embed") return `${d.vectors} vectors · ${d.model}\ndim ${d.dim} · ${d.metric}`;
   if(stage==="graph") return `${d.nodes} nodes · ${d.edges} edges`;
