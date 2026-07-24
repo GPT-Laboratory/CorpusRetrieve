@@ -14,10 +14,10 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from docparse.stage5.canonical import normalize_chunk, payload_for
-from docparse.stage5.embedding import BM25SparseEncoder, Embedder, resolve_embedder
-from docparse.stage5.graph import KnowledgeGraph
-from docparse.stage5.vectorstore import COLLECTION_OF, VectorStore
+from docparse.vectorization.canonical import normalize_chunk, payload_for
+from docparse.vectorization.embedding import BM25SparseEncoder, Embedder, resolve_embedder
+from docparse.vectorization.graph import KnowledgeGraph
+from docparse.vectorization.vectorstore import COLLECTION_OF, VectorStore
 
 
 @dataclass
@@ -92,6 +92,15 @@ def ingest(chunks_path: str | Path, cfg: IngestConfig | None = None,
     if cfg.graph_outdir:
         res.exports = kg.export(cfg.graph_outdir)
         sparse.save(Path(cfg.graph_outdir) / "sparse_encoder.json")
+        # persist a slim chunk cache so a restarted service can restore
+        # neighbour text for graph expansion without reparsing source docs
+        import json as _json
+        cache = [{"chunk_id": c["chunk_id"], "text": c.get("text", ""),
+                  "pages": c.get("pages", []),
+                  "metadata": {"label": (c.get("metadata") or {}).get("label")}}
+                 for c in chunks]
+        (Path(cfg.graph_outdir) / "chunk_cache.json").write_text(
+            _json.dumps(cache, ensure_ascii=False), encoding="utf-8")
     res.timings = {"setup_s": round(t1 - t0, 2), "embed_upsert_s": round(t2 - t1, 2),
                    "graph_s": round(t3 - t2, 2)}
     return res, store, kg, sparse

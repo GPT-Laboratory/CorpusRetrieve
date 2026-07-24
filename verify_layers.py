@@ -1,7 +1,7 @@
 """Verify every enrichment layer against a real paper, with printed evidence.
 
 Usage:
-    python verify_layers.py [path/to/paper.pdf]      (default: mydocs/climate_paper.pdf)
+    python verify_layers.py [path/to/paper.pdf]      (default: mydocs/)
 
 Each check maps 1:1 to a row of the requirements table and prints PASS/FAIL
 plus the actual extracted evidence, so you can eyeball quality — not just counts.
@@ -148,4 +148,4 @@ def main(path: str) -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main(sys.argv[1] if len(sys.argv) > 1 else "mydocs/climate_paper.pdf"))
+    sys.exit(main(sys.argv[1] if len(sys.argv) > 1 else "mydocs/"))

@@ -1,0 +1,42 @@
+# Four-container topology from the analysis: api + worker + qdrant + neo4j.
+# For a minimal demo, `docker compose up api qdrant` is enough.
+services:
+  api:
+    build: .
+    ports: ["8000:8000"]
+    environment:
+      EMBEDDER: ${EMBEDDER:-auto}        # set to bge-m3 once baked into the image
+      RERANKER: ${RERANKER:-auto}        # set to ce:BAAI/bge-reranker-v2-m3 for production
+      QDRANT_URL: http://qdrant:6333     # server mode: concurrent ingest+search
+      INDEX_DIR: /data/index
+    volumes: ["docparse_data:/data"]
+    depends_on: [qdrant]
+
+  # Optional ingestion worker: same image, no HTTP port. Wire to a queue (Celery/RQ/
+  # arq) so large uploads don't block the API. Stub command shown.
+  worker:
+    build: .
+    environment:
+      EMBEDDER: ${EMBEDDER:-auto}
+      QDRANT_URL: http://qdrant:6333
+      INDEX_DIR: /data/index
+    volumes: ["docparse_data:/data"]
+    depends_on: [qdrant]
+    command: ["python", "-c", "print('attach your queue consumer here'); import time; time.sleep(1e9)"]
+
+  qdrant:
+    image: qdrant/qdrant:latest
+    ports: ["6333:6333"]
+    volumes: ["qdrant_data:/qdrant/storage"]
+
+  neo4j:
+    image: neo4j:5-community
+    ports: ["7474:7474", "7687:7687"]
+    environment:
+      NEO4J_AUTH: neo4j/docparse123
+    volumes: ["neo4j_data:/data"]
+
+volumes:
+  docparse_data:
+  qdrant_data:
+  neo4j_data:

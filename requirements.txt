@@ -15,3 +15,14 @@ anthropic>=0.40            # VLM figure description (docparse.enrich); usage sta
 python-dotenv>=1.0         # loads ANTHROPIC_API_KEY from a .env file
 qdrant-client>=1.12       # vector store (local mode works offline)
 networkx>=3.2             # knowledge graph (vendor-neutral property graph)
+
+# Microservice (service/app.py). Installed by default so `pip install -r
+# requirements.txt` alone is enough to run the HTTP service.
+fastapi>=0.110
+uvicorn[standard]>=0.29
+python-multipart>=0.0.9
+
+# Optional extras (install manually if you use them):
+#   FlagEmbedding>=1.2        # real BGE-M3 dense embeddings (EMBEDDER=bge-m3)
+#   sentence-transformers>=3  # cross-encoder reranker (RERANKER=ce:<model>) / ST embedders
+#   pyvis>=0.3.2              # interactive knowledge-graph HTML (visualize)

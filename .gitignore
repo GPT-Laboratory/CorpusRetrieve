@@ -29,9 +29,11 @@ report.json
 chunks.json
 *.out.json
 assets/
+index/
 out/
 output/
 vectorization_output/
+kg.html
 
 # ---- Jupyter ----
 .ipynb_checkpoints/
