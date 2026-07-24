@@ -21,6 +21,7 @@ networkx>=3.2             # knowledge graph (vendor-neutral property graph)
 fastapi>=0.110
 uvicorn[standard]>=0.29
 python-multipart>=0.0.9
+aiofiles>=23.2          # StaticFiles serving for the Stage-1 web app
 
 # Optional extras (install manually if you use them):
 #   FlagEmbedding>=1.2        # real BGE-M3 dense embeddings (EMBEDDER=bge-m3)

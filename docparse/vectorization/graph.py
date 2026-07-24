@@ -228,8 +228,17 @@ class KnowledgeGraph:
         return {"graphml": str(gml), "json": str(js), "cypher": str(cy)}
 
 
+def _cy_value(v: Any) -> str:
+    """JSON-encode a Cypher property value, collapsing embedded newlines/tabs so
+    each statement stays on a single line (robust for `cypher-shell < file` and
+    line-oriented importers). json.dumps already escapes quotes/backslashes."""
+    if isinstance(v, str):
+        v = re.sub(r"\s+", " ", v).strip()
+    return json.dumps(v)
+
+
 def _cyprops(props: dict[str, Any]) -> str:
-    items = ", ".join(f"{re.sub(r'[^A-Za-z0-9_]', '_', k)}: {json.dumps(v)}"
+    items = ", ".join(f"{re.sub(r'[^A-Za-z0-9_]', '_', k)}: {_cy_value(v)}"
                       for k, v in props.items())
     return "{" + items + "}"
 

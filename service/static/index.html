@@ -1,0 +1,481 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>CorpusRetrieve — developer mode</title>
+<script src="/static/vendor/react.production.min.js"></script>
+<script src="/static/vendor/react-dom.production.min.js"></script>
+<script src="/static/vendor/babel.min.js"></script>
+<style>
+  :root{
+    --bg:#0d1117; --panel:#161b22; --panel2:#1c2230; --border:#2b313b;
+    --ink:#e6edf3; --dim:#9aa4b2; --faint:#6b7280;
+    --teal:#2dd4bf; --amber:#f59e0b; --violet:#a78bfa; --rose:#fb7185;
+    --green:#34d399; --blue:#60a5fa;
+    --mono:"SF Mono",ui-monospace,"Cascadia Code",Consolas,monospace;
+    --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);font-size:14px}
+  a{color:var(--teal)}
+  .app{display:flex;flex-direction:column;height:100vh}
+  header{padding:12px 20px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:16px;background:var(--panel)}
+  header h1{font-size:15px;margin:0;font-weight:600;letter-spacing:.3px}
+  header .tag{font-size:11px;color:var(--faint);border:1px solid var(--border);border-radius:4px;padding:2px 8px;font-family:var(--mono)}
+  header .sub{color:var(--dim);font-size:12px}
+  .upload{margin-left:auto;display:flex;gap:10px;align-items:center}
+  .btn{background:var(--panel2);border:1px solid var(--border);color:var(--ink);padding:6px 14px;border-radius:6px;cursor:pointer;font-size:13px}
+  .btn:hover{border-color:var(--teal)}
+  .btn.primary{background:var(--teal);color:#04211d;border-color:var(--teal);font-weight:600}
+  .btn:disabled{opacity:.4;cursor:not-allowed}
+
+  /* pipeline spine */
+  .spine{display:flex;align-items:stretch;gap:0;padding:14px 20px;border-bottom:1px solid var(--border);background:var(--panel);overflow-x:auto}
+  .stage{flex:1;min-width:150px;border:1px solid var(--border);border-radius:8px;padding:10px 12px;margin-right:8px;position:relative;transition:.2s;background:var(--panel2)}
+  .stage:last-child{margin-right:0}
+  .stage .num{font-family:var(--mono);font-size:11px;color:var(--faint)}
+  .stage .name{font-weight:600;font-size:13px;margin:2px 0 6px;text-transform:capitalize}
+  .stage .st{font-size:11px;font-family:var(--mono);color:var(--dim)}
+  .stage .ms{position:absolute;top:10px;right:12px;font-size:10px;font-family:var(--mono);color:var(--faint)}
+  .stage.pending{opacity:.5}
+  .stage.running{border-color:var(--amber);box-shadow:0 0 0 1px var(--amber) inset}
+  .stage.running .st{color:var(--amber)}
+  .stage.done{border-color:var(--green)}
+  .stage.done .st{color:var(--green)}
+  .stage.error{border-color:var(--rose)}
+  .stage .detail{margin-top:6px;font-size:10.5px;font-family:var(--mono);color:var(--dim);line-height:1.5;max-height:74px;overflow:auto}
+  .stage .bar{position:absolute;left:0;bottom:0;height:2px;background:var(--amber);width:0;transition:width .3s}
+  .stage.done .bar{width:100%;background:var(--green)}
+
+  /* main */
+  .main{flex:1;display:grid;grid-template-columns:340px 1fr 380px;overflow:hidden}
+  .col{overflow:auto;border-right:1px solid var(--border)}
+  .col:last-child{border-right:none}
+  .col h2{font-size:11px;text-transform:uppercase;letter-spacing:.6px;color:var(--faint);margin:0;padding:12px 14px 8px;position:sticky;top:0;background:var(--bg);z-index:2}
+
+  /* chunk list */
+  .chunk{padding:9px 14px;border-bottom:1px solid var(--border);cursor:pointer}
+  .chunk:hover{background:var(--panel2)}
+  .chunk.sel{background:var(--panel2);box-shadow:inset 3px 0 0 var(--teal)}
+  .chunk .row{display:flex;align-items:center;gap:8px}
+  .pill{font-size:9.5px;font-family:var(--mono);padding:1px 6px;border-radius:10px;text-transform:uppercase;letter-spacing:.4px;white-space:nowrap}
+  .chunk .cid{font-family:var(--mono);font-size:10px;color:var(--faint);margin-left:auto}
+  .chunk .prev{font-size:12px;color:var(--dim);margin-top:4px;line-height:1.45;max-height:34px;overflow:hidden}
+  .chunk .meta{font-size:10px;font-family:var(--mono);color:var(--faint);margin-top:4px}
+
+  /* viewer */
+  .viewer{padding:0 0 40px}
+  .pagewrap{position:relative;margin:14px auto;box-shadow:0 2px 16px rgba(0,0,0,.5);width:fit-content}
+  .pagewrap img{display:block;max-width:100%}
+  .ov{position:absolute;border:1.5px solid transparent;border-radius:2px;pointer-events:auto;cursor:pointer;transition:.12s}
+  .ov:hover{background:rgba(45,212,191,.10)}
+  .ov.hi{border-color:var(--teal);background:rgba(45,212,191,.18);box-shadow:0 0 0 1px var(--teal)}
+  .pageno{color:var(--faint);font-family:var(--mono);font-size:11px;text-align:center;padding:4px}
+  .viewer .empty{color:var(--faint);text-align:center;padding:60px 20px;font-size:13px;line-height:1.7}
+
+  /* inspector */
+  .insp{padding:14px}
+  .insp .k{font-size:10px;text-transform:uppercase;letter-spacing:.5px;color:var(--faint);margin-top:14px}
+  .insp .v{font-family:var(--mono);font-size:12px;color:var(--ink);word-break:break-word;margin-top:3px;line-height:1.5}
+  .insp .txt{font-size:13px;line-height:1.6;color:var(--dim);margin-top:4px;background:var(--panel2);padding:10px;border-radius:6px;max-height:230px;overflow:auto}
+  .trace{display:flex;flex-wrap:wrap;gap:5px;margin-top:5px}
+  .trace .e{font-family:var(--mono);font-size:10px;background:var(--panel2);border:1px solid var(--border);padding:2px 6px;border-radius:4px;cursor:pointer}
+  .trace .e:hover{border-color:var(--teal)}
+
+  /* downloads */
+  .dl{padding:14px}
+  .dl .item{display:flex;align-items:center;gap:8px;padding:8px 0;border-bottom:1px solid var(--border)}
+  .dl .item .nm{font-family:var(--mono);font-size:12px}
+  .dl .item .ds{font-size:11px;color:var(--faint);flex:1}
+  .dl a.get{margin-left:auto;font-size:11px;border:1px solid var(--border);padding:4px 10px;border-radius:5px;text-decoration:none;color:var(--teal)}
+  .dl a.get:hover{border-color:var(--teal)}
+  .tabs{display:flex;gap:4px;padding:8px 14px 0}
+  .tab{font-size:11px;padding:5px 12px;border:1px solid var(--border);border-bottom:none;border-radius:6px 6px 0 0;cursor:pointer;color:var(--dim)}
+  .tab.on{background:var(--panel2);color:var(--ink)}
+  .snippet{font-family:var(--mono);font-size:10.5px;background:#0a0e14;border:1px solid var(--border);border-radius:6px;padding:10px;color:var(--dim);white-space:pre;overflow:auto;line-height:1.5;margin:10px 14px}
+  .filt{padding:8px 14px;display:flex;gap:6px;flex-wrap:wrap}
+  .filt .f{font-size:10px;font-family:var(--mono);padding:2px 8px;border:1px solid var(--border);border-radius:10px;cursor:pointer;color:var(--dim)}
+  .filt .f.on{border-color:var(--teal);color:var(--teal)}
+  .drop{margin:40px;border:2px dashed var(--border);border-radius:12px;padding:60px;text-align:center;color:var(--faint)}
+  .drop.hot{border-color:var(--teal);color:var(--teal)}
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const {useState,useRef,useEffect,useCallback} = React;
+const API = "";  // same origin
+
+const TYPE_COLORS = {
+  section_text:"#60a5fa", claim:"#f59e0b", table_summary:"#a78bfa",
+  table_row_group:"#c084fc", figure:"#34d399", figure_panel:"#6ee7b7",
+  formula:"#fbbf24", reference:"#9ca3af", summary:"#fb7185",
+  heading:"#60a5fa", narrative:"#7dd3fc", caption:"#34d399", title:"#f472b6"
+};
+const col = t => TYPE_COLORS[t] || "#9aa4b2";
+
+function Pill({t}){return <span className="pill" style={{background:col(t)+"22",color:col(t),border:"1px solid "+col(t)+"55"}}>{t}</span>;}
+
+function App(){
+  const [job,setJob]=useState(null);
+  const [stages,setStages]=useState([]);      // {stage,status,elapsed_ms,detail}
+  const [manifest,setManifest]=useState(null);
+  const [chunks,setChunks]=useState([]);
+  const [sel,setSel]=useState(null);          // selected chunk
+  const [elements,setElements]=useState({});  // page -> {page_dims, elements}
+  const [page,setPage]=useState(1);
+  const [hiEls,setHiEls]=useState([]);        // element ids to highlight
+  const [dropHot,setDropHot]=useState(false);
+  const [typeFilter,setTypeFilter]=useState(null);
+  const [dlTab,setDlTab]=useState("qdrant");
+  const [centerView,setCenterView]=useState("source");  // source | graph
+  const [graph,setGraph]=useState(null);      // {nodes,edges}
+  const [useVlm,setUseVlm]=useState(false);
+  const fileRef=useRef();
+
+  const stageState = (name) => {
+    const evs = stages.filter(s=>s.stage===name);
+    if(!evs.length) return {status:"pending"};
+    return evs[evs.length-1];
+  };
+
+  async function upload(file){
+    setStages([]);setManifest(null);setChunks([]);setSel(null);setElements({});setHiEls([]);setGraph(null);setCenterView("source");
+    const fd=new FormData(); fd.append("file",file);
+    const r=await fetch(API+"/api/jobs",{method:"POST",body:fd});
+    const j=await r.json(); setJob(j.job_id);
+    stream(j.job_id);
+  }
+
+  function stream(jobId){
+    const es=new EventSource(API+`/api/jobs/${jobId}/stream?describe_figures=${useVlm?1:0}`);
+    // queue stage events and release them with a minimum visible dwell so the
+    // pipeline reads as a progression rather than a jump (stages run in ms).
+    const queue=[]; let draining=false;
+    const drain=()=>{
+      if(draining||!queue.length) return;
+      draining=true;
+      const d=queue.shift();
+      setStages(prev=>[...prev,d]);
+      const dwell = d.status==="started" ? 420 : 260;
+      setTimeout(()=>{draining=false;drain();}, dwell);
+    };
+    es.addEventListener("stage",e=>{ queue.push(JSON.parse(e.data)); drain(); });
+    es.addEventListener("manifest",e=>{ setManifest(JSON.parse(e.data)); });
+    es.addEventListener("done",()=>{ es.close();
+      const wait=()=>{ if(queue.length||draining){setTimeout(wait,200);return;} loadResults(jobId); };
+      wait();
+    });
+    es.addEventListener("error",e=>{ es.close(); });
+  }
+
+  async function loadResults(jobId){
+    const ch=await (await fetch(API+`/api/jobs/${jobId}/chunks`)).json();
+    setChunks(ch.chunks||[]);
+    loadPage(jobId,1);
+    fetch(API+`/api/jobs/${jobId}/graph`).then(r=>r.json()).then(setGraph).catch(()=>{});
+  }
+  async function loadPage(jobId,p){
+    if(elements[p]) {setPage(p);return;}
+    const e=await (await fetch(API+`/api/jobs/${jobId}/elements?page=${p}`)).json();
+    setElements(prev=>({...prev,[p]:e})); setPage(p);
+  }
+
+  function selectChunk(c){
+    setSel(c);
+    setHiEls(c.element_ids||[]);
+    if(c.pages && c.pages.length) loadPage(job,c.pages[0]);
+  }
+
+  const pageData = elements[page];
+  const dims = pageData && pageData.page_dims && pageData.page_dims[String(page)];
+
+  const filtered = typeFilter ? chunks.filter(c=>c.chunk_type===typeFilter) : chunks;
+  const chunkTypes = [...new Set(chunks.map(c=>c.chunk_type))];
+
+  const snippets = {
+    qdrant:`# load embeddings.jsonl into Qdrant\nimport json, qdrant_client as q\nfrom qdrant_client import models as m\nc=q.QdrantClient(":memory:")\nrecs=[json.loads(l) for l in open("embeddings.jsonl")]\ndim=len(recs[0]["vector"])\nfor coll in set(r["collection"] for r in recs):\n    c.recreate_collection(coll,\n      vectors_config=m.VectorParams(size=dim,distance=m.Distance.COSINE))\nfor r in recs:\n    c.upsert(r["collection"], points=[m.PointStruct(\n        id=r["id"], vector=r["vector"], payload=r["payload"])])`,
+    neo4j:`// load knowledge_graph.cypher into Neo4j\n// (already MERGE-based & idempotent)\ncypher-shell -u neo4j -p <pw> < knowledge_graph.cypher\n\n// or from python:\nfrom neo4j import GraphDatabase\nd=GraphDatabase.driver("bolt://localhost:7687",auth=("neo4j","pw"))\nwith d.session() as s:\n  for stmt in open("knowledge_graph.cypher").read().split(";"):\n    if stmt.strip(): s.run(stmt)`,
+    pgvector:`-- load embeddings.jsonl into Postgres/pgvector\nCREATE EXTENSION IF NOT EXISTS vector;\nCREATE TABLE chunks(id text primary key,\n  embedding vector(512), payload jsonb);\n-- then COPY / INSERT each record's vector + payload`
+  };
+
+  return (
+  <div className="app">
+    <header>
+      <h1>CorpusRetrieve</h1>
+      <span className="tag">developer mode</span>
+      <span className="sub">documents → retrievable, grounded, portable evidence</span>
+      <div className="upload">
+        {manifest && <span className="sub" style={{fontFamily:"var(--mono)",fontSize:11}}>
+          {manifest.summary.pages}p · {manifest.summary.elements} elts · {manifest.summary.chunks} chunks · {manifest.summary.vectors} vec · {manifest.summary.graph_nodes} nodes</span>}
+        <input ref={fileRef} type="file" style={{display:"none"}}
+          accept=".pdf,.docx,.html,.htm,.csv,.xlsx,.json,.txt,.png,.jpg,.jpeg"
+          onChange={e=>e.target.files[0]&&upload(e.target.files[0])}/>
+        <label style={{fontSize:11,color:"var(--dim)",display:"flex",alignItems:"center",gap:5,cursor:"pointer"}}
+          title="Describe figures with a vision model (Claude). Needs ANTHROPIC_API_KEY; adds latency & API cost.">
+          <input type="checkbox" checked={useVlm} onChange={e=>setUseVlm(e.target.checked)}/>
+          describe figures (VLM)
+        </label>
+        <button className="btn primary" onClick={()=>fileRef.current.click()}>Upload document</button>
+      </div>
+    </header>
+
+    {/* six-stage spine */}
+    <div className="spine">
+      {["parse","extract","enrich","chunk","embed","graph"].map((name,i)=>{
+        const s=stageState(name);
+        return (
+        <div key={name} className={"stage "+ (s.status||"pending")}>
+          <div className="ms">{s.elapsed_ms!=null?s.elapsed_ms+"ms":""}</div>
+          <div className="num">STAGE {i+1}</div>
+          <div className="name">{name}</div>
+          <div className="st">{s.status||"pending"}</div>
+          {s.detail && <div className="detail">{fmtDetail(name,s.detail)}</div>}
+          <div className="bar"></div>
+        </div>);
+      })}
+    </div>
+
+    {!job ? (
+      <div className={"drop"+(dropHot?" hot":"")}
+        onDragOver={e=>{e.preventDefault();setDropHot(true);}}
+        onDragLeave={()=>setDropHot(false)}
+        onDrop={e=>{e.preventDefault();setDropHot(false);if(e.dataTransfer.files[0])upload(e.dataTransfer.files[0]);}}>
+        <div style={{fontSize:16,marginBottom:8}}>Drop a document here, or use “Upload document”.</div>
+        <div>PDF · DOCX · HTML · XLSX · CSV · JSON · images · text<br/>
+        Watch it flow through all six stages, inspect every chunk’s source region,<br/>and download portable chunks + embeddings + knowledge graph.</div>
+      </div>
+    ) : (
+    <div className="main">
+      {/* LEFT: chunks */}
+      <div className="col">
+        <h2>Chunks {chunks.length?`(${filtered.length})`:""}</h2>
+        {chunkTypes.length>0 &&
+          <div className="filt">
+            <span className={"f"+(!typeFilter?" on":"")} onClick={()=>setTypeFilter(null)}>all</span>
+            {chunkTypes.map(t=><span key={t} className={"f"+(typeFilter===t?" on":"")}
+              style={typeFilter===t?{borderColor:col(t),color:col(t)}:{}}
+              onClick={()=>setTypeFilter(t)}>{t}</span>)}
+          </div>}
+        {filtered.map(c=>(
+          <div key={c.chunk_id} className={"chunk"+(sel&&sel.chunk_id===c.chunk_id?" sel":"")}
+               onClick={()=>selectChunk(c)}>
+            <div className="row"><Pill t={c.chunk_type}/>
+              <span className="cid">{c.chunk_id.split("::").slice(-2).join("::")}</span></div>
+            <div className="prev">{c.text.slice(0,140)}</div>
+            <div className="meta">{c.pages&&c.pages.length?`p${c.pages.join(",")}`:"—"} · {c.token_estimate||0} tok · {c.element_ids?c.element_ids.length:0} elts{c.section_path&&c.section_path.length?` · ${c.section_path[0]}`:""}</div>
+          </div>
+        ))}
+        {!chunks.length && <div style={{padding:14,color:"var(--faint)",fontSize:12}}>Chunks appear when the pipeline finishes…</div>}
+      </div>
+
+      {/* CENTER: document viewer with bbox overlay */}
+      <div className="col viewer">
+        <div style={{display:"flex",alignItems:"center",gap:10,padding:"0 14px"}}>
+          <h2 style={{padding:"12px 0 8px"}}>{centerView==="source"?"Source · provenance overlay"+(dims?` · page ${page}`:""):"Knowledge graph"}</h2>
+          <div style={{marginLeft:"auto",display:"flex",gap:4}}>
+            <span className={"tab"+(centerView==="source"?" on":"")} style={{borderBottom:"1px solid var(--border)",borderRadius:6}} onClick={()=>setCenterView("source")}>source</span>
+            <span className={"tab"+(centerView==="graph"?" on":"")} style={{borderBottom:"1px solid var(--border)",borderRadius:6}} onClick={()=>setCenterView("graph")}>graph{graph?` (${graph.n_nodes})`:""}</span>
+          </div>
+        </div>
+        {centerView==="graph" ? (
+          graph ? <GraphView graph={graph} sel={sel}/> :
+            <div className="empty">Building knowledge graph…<br/>
+            <span style={{fontSize:11}}>(appears when the pipeline finishes)</span></div>
+        ) : !dims ? (
+          <div className="empty">The rendered page with bounding-box overlays appears here.<br/>
+          Select a chunk on the left to jump to and highlight its source region.<br/>
+          <span style={{fontSize:11}}>(Page rendering requires a PDF source.)</span></div>
+        ) : (
+          <div>
+            <PageOverlay job={job} page={page} dims={dims}
+              elements={pageData.elements} hi={hiEls}
+              onPick={id=>setHiEls([id])}/>
+            <div className="pageno">
+              <button className="btn" disabled={page<=1} onClick={()=>loadPage(job,page-1)}>‹</button>
+              &nbsp; page {page} / {pageData.page_count} &nbsp;
+              <button className="btn" disabled={page>=pageData.page_count} onClick={()=>loadPage(job,page+1)}>›</button>
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* RIGHT: inspector + downloads */}
+      <div className="col">
+        <h2>Inspector</h2>
+        {sel ? (
+          <div className="insp">
+            <div className="row"><Pill t={sel.chunk_type}/></div>
+            <div className="k">chunk id</div><div className="v">{sel.chunk_id}</div>
+            {sel.role&&<><div className="k">role</div><div className="v">{sel.role}</div></>}
+            {sel.section_path&&sel.section_path.length>0&&<><div className="k">section path</div><div className="v">{sel.section_path.join("  ›  ")}</div></>}
+            <div className="k">pages</div><div className="v">{sel.pages&&sel.pages.length?sel.pages.join(", "):"—"}</div>
+            {sel.label&&<><div className="k">label</div><div className="v">{sel.label}</div></>}
+            <div className="k">token estimate</div><div className="v">{sel.token_estimate}</div>
+            {sel.char_start!=null&&<><div className="k">char span</div><div className="v">{sel.char_start} – {sel.char_end}</div></>}
+            <div className="k">source elements ({sel.element_ids?sel.element_ids.length:0}) — click to highlight</div>
+            <div className="trace">
+              {(sel.element_ids||[]).map(id=><span key={id} className="e"
+                onClick={()=>{setHiEls([id]);}}>{id.slice(0,8)}</span>)}
+            </div>
+            <div className="k">text</div><div className="txt">{sel.text}</div>
+          </div>
+        ) : <div style={{padding:14,color:"var(--faint)",fontSize:12}}>Select a chunk to inspect its metadata, provenance, and source elements.</div>}
+
+        {manifest && <>
+          <h2 style={{marginTop:10}}>Portable artifacts</h2>
+          <div className="dl">
+            {[
+              ["chunks","chunks.json","typed chunks + provenance"],
+              ["embeddings","embeddings.jsonl","{id,vector,payload} — any vector DB"],
+              ["graph_json","knowledge_graph.json","nodes + edges"],
+              ["graph_cypher","knowledge_graph.cypher","load into Neo4j"],
+              ["graph_graphml","knowledge_graph.graphml","Gephi / yEd"],
+              ["extraction","extraction.json","raw elements + bbox"],
+            ].map(([art,nm,ds])=>(
+              <div className="item" key={art}>
+                <span className="nm">{nm}</span><span className="ds">{ds}</span>
+                <a className="get" href={API+`/api/jobs/${job}/download/${art}`}>download</a>
+              </div>
+            ))}
+          </div>
+          <h2>Load into your stack</h2>
+          <div className="tabs">
+            {["qdrant","neo4j","pgvector"].map(t=>
+              <span key={t} className={"tab"+(dlTab===t?" on":"")} onClick={()=>setDlTab(t)}>{t}</span>)}
+          </div>
+          <div className="snippet">{snippets[dlTab]}</div>
+        </>}
+      </div>
+    </div>
+    )}
+  </div>);
+}
+
+function GraphView({graph,sel}){
+  const [pos,setPos]=useState(null);
+  const [hover,setHover]=useState(null);
+  const W=760,H=560;
+  const NODE_COLORS={Paper:"#e63946",Section:"#457b9d",Chunk:"#a8dadc",Claim:"#f59e0b",
+    Figure:"#34d399",FigurePanel:"#6ee7b7",Table:"#a78bfa",TableRowGroup:"#c084fc",
+    Formula:"#fbbf24",ReferenceWork:"#9ca3af"};
+  const ncol=t=>NODE_COLORS[t]||"#8899a6";
+
+  useEffect(()=>{
+    if(!graph||!graph.nodes.length){setPos(null);return;}
+    const nodes=graph.nodes.map((n,i)=>({...n,
+      x:W/2+Math.cos(i)*120*Math.random()+ (Math.random()-.5)*80,
+      y:H/2+Math.sin(i)*120*Math.random()+ (Math.random()-.5)*80, vx:0,vy:0}));
+    const idx=Object.fromEntries(nodes.map((n,i)=>[n.id,i]));
+    const links=graph.edges.filter(e=>idx[e.source]!=null&&idx[e.target]!=null)
+      .map(e=>({s:idx[e.source],t:idx[e.target],rel:e.rel}));
+    // force sim: repulsion + spring + centering; run fixed iterations then render
+    for(let it=0;it<300;it++){
+      const k=it<150?1:0.5;
+      for(let i=0;i<nodes.length;i++){
+        let fx=0,fy=0;
+        for(let j=0;j<nodes.length;j++){ if(i===j)continue;
+          let dx=nodes[i].x-nodes[j].x, dy=nodes[i].y-nodes[j].y;
+          let d2=dx*dx+dy*dy+0.01, d=Math.sqrt(d2);
+          const rep=1600/d2; fx+=dx/d*rep; fy+=dy/d*rep;
+        }
+        fx+=(W/2-nodes[i].x)*0.008; fy+=(H/2-nodes[i].y)*0.008;
+        nodes[i].vx=(nodes[i].vx+fx)*0.85*k; nodes[i].vy=(nodes[i].vy+fy)*0.85*k;
+      }
+      for(const l of links){
+        const a=nodes[l.s],b=nodes[l.t];
+        let dx=b.x-a.x,dy=b.y-a.y,d=Math.sqrt(dx*dx+dy*dy)+0.01;
+        const spring=(d-70)*0.02;
+        a.vx+=dx/d*spring; a.vy+=dy/d*spring; b.vx-=dx/d*spring; b.vy-=dy/d*spring;
+      }
+      for(const n of nodes){ n.x+=n.vx; n.y+=n.vy;
+        n.x=Math.max(20,Math.min(W-20,n.x)); n.y=Math.max(20,Math.min(H-20,n.y)); }
+    }
+    setPos({nodes,links,idx});
+  },[graph]);
+
+  if(!pos) return <div className="empty">Laying out graph…</div>;
+  // highlight nodes connected to the selected chunk
+  const selId = sel ? pos.nodes.find(n=>n.id.endsWith("::"+sel.chunk_id.split("::").slice(-2).join("::"))||n.id.endsWith(sel.chunk_id)) : null;
+  const selIdx = selId ? pos.idx[selId.id] : -1;
+  const nbr = new Set();
+  if(selIdx>=0){ pos.links.forEach(l=>{ if(l.s===selIdx)nbr.add(l.t); if(l.t===selIdx)nbr.add(l.s); }); }
+
+  const types=[...new Set(pos.nodes.map(n=>n.type))];
+  return (
+   <div style={{padding:"6px 14px"}}>
+     <div style={{display:"flex",flexWrap:"wrap",gap:8,marginBottom:6}}>
+       {types.map(t=><span key={t} style={{fontSize:10,fontFamily:"var(--mono)",color:ncol(t)}}>
+         <span style={{display:"inline-block",width:8,height:8,borderRadius:8,background:ncol(t),marginRight:4}}></span>{t}</span>)}
+     </div>
+     <svg width="100%" viewBox={`0 0 ${W} ${H}`} style={{background:"#0a0e14",borderRadius:8,border:"1px solid var(--border)"}}>
+       {pos.links.map((l,i)=>{
+         const a=pos.nodes[l.s],b=pos.nodes[l.t];
+         const on = selIdx>=0 && (l.s===selIdx||l.t===selIdx);
+         return <line key={i} x1={a.x} y1={a.y} x2={b.x} y2={b.y}
+           stroke={on?"#2dd4bf":"#2b313b"} strokeWidth={on?1.6:0.6} opacity={selIdx>=0&&!on?0.25:0.8}/>;
+       })}
+       {pos.nodes.map((n,i)=>{
+         const dim = selIdx>=0 && i!==selIdx && !nbr.has(i);
+         const r = n.type==="Paper"?9:n.type==="Section"?6:4.2;
+         return <g key={n.id} opacity={dim?0.28:1}
+           onMouseEnter={()=>setHover(n)} onMouseLeave={()=>setHover(null)} style={{cursor:"pointer"}}>
+           <circle cx={n.x} cy={n.y} r={i===selIdx?r+2:r} fill={ncol(n.type)}
+             stroke={i===selIdx?"#fff":"none"} strokeWidth={i===selIdx?1.5:0}/>
+         </g>;
+       })}
+       {hover && <g>
+         <rect x={Math.min(hover.x+8,W-190)} y={Math.max(hover.y-24,4)} width="184" height="34" rx="4" fill="#161b22" stroke="#2b313b"/>
+         <text x={Math.min(hover.x+14,W-184)} y={Math.max(hover.y-10,18)} fill="#e6edf3" fontSize="10" fontFamily="var(--mono)">{hover.type}</text>
+         <text x={Math.min(hover.x+14,W-184)} y={Math.max(hover.y+2,30)} fill="#9aa4b2" fontSize="9" fontFamily="var(--mono)">{(hover.label||"").slice(0,30)}</text>
+       </g>}
+     </svg>
+     <div style={{fontSize:11,color:"var(--faint)",marginTop:6,fontFamily:"var(--mono)"}}>
+       {pos.nodes.length} nodes · {pos.links.length} edges{sel?" · highlighting neighbours of selected chunk":""} · hover a node for detail · full graph downloads as JSON/Cypher/GraphML →
+     </div>
+   </div>);
+}
+
+function PageOverlay({job,page,dims,elements,hi,onPick}){
+  const [natural,setNatural]=useState(null);   // rendered px size
+  const imgUrl=API+`/api/jobs/${job}/page/${page}.png?dpi=120`;
+  // scale factor: rendered px per PDF point
+  return (
+    <div className="pagewrap">
+      <img src={imgUrl} onLoad={e=>setNatural({w:e.target.clientWidth,h:e.target.clientHeight})}
+           onError={()=>setNatural(null)}/>
+      {natural && elements.filter(e=>e.bbox).map(e=>{
+        const sx=natural.w/dims.width, sy=natural.h/dims.height;
+        const [x0,y0,x1,y1]=e.bbox;
+        const on=hi.includes(e.id);
+        return <div key={e.id}
+          className={"ov"+(on?" hi":"")}
+          title={`${e.kind}${e.role?" · "+e.role:""}\n${(e.text||"").slice(0,120)}`}
+          onClick={()=>onPick(e.id)}
+          style={{left:x0*sx,top:y0*sy,width:(x1-x0)*sx,height:(y1-y0)*sy,
+                  borderColor: on?undefined:col(e.kind)+"88"}}/>;
+      })}
+    </div>
+  );
+}
+
+function fmtDetail(stage,d){
+  if(stage==="parse") return `${d.doc_type||""} · ${d.pages||"?"}p · ${d.backend||""}`;
+  if(stage==="extract") return `${d.elements} elements · ${d.with_bbox} with bbox\n`+Object.entries(d.by_kind||{}).map(([k,v])=>`${k}:${v}`).join(" ");
+  if(stage==="enrich"){
+    let base=`claims:${d.claims} · cites:${d.citations}\n`+Object.entries(d.roles||{}).map(([k,v])=>`${k}:${v}`).join(" ");
+    if(d.vlm==="claude") base+=`\nVLM: described ${d.figures_described}/${d.figures_total} figures`;
+    else if(d.vlm==="skipped") base+=`\nVLM skipped: ${(d.reason||"").slice(0,60)}`;
+    return base;
+  }
+  if(stage==="chunk") return `${d.chunks} chunks\n`+Object.entries(d.by_type||{}).map(([k,v])=>`${k}:${v}`).join(" ");
+  if(stage==="embed") return `${d.vectors} vectors · ${d.model}\ndim ${d.dim} · ${d.metric}`;
+  if(stage==="graph") return `${d.nodes} nodes · ${d.edges} edges`;
+  return "";
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App/>);
+</script>
+</body>
+</html>

@@ -327,6 +327,13 @@ def _pymupdf_extract(path: str, cfg: ExtractionConfig, result: ExtractionResult)
     result.stats["boilerplate_patterns"] = len(boiler)
     scale = 72.0 / cfg.image_dpi  # raster px -> PDF points
 
+    # per-page dimensions (PDF points, top-left origin) so a UI overlay can
+    # scale element bboxes onto a rendered page image without guessing.
+    result.stats["page_dims"] = {
+        str(p + 1): {"width": doc[p].rect.width, "height": doc[p].rect.height,
+                     "unit": "pt", "origin": "top-left"}
+        for p in range(doc.page_count)}
+
     n_pages = doc.page_count if cfg.max_pages is None else min(doc.page_count, cfg.max_pages)
     for pno in range(n_pages):
         page = doc[pno]
