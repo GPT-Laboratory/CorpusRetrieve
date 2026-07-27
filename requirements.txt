@@ -21,10 +21,8 @@ networkx>=3.2             # knowledge graph (vendor-neutral property graph)
 fastapi>=0.110
 uvicorn[standard]>=0.29
 python-multipart>=0.0.9
-aiofiles>=23.2          # StaticFiles serving for the Stage-1 web app
 
 # Optional extras (install manually if you use them):
 #   FlagEmbedding>=1.2        # real BGE-M3 dense embeddings (EMBEDDER=bge-m3)
 #   sentence-transformers>=3  # cross-encoder reranker (RERANKER=ce:<model>) / ST embedders
 #   pyvis>=0.3.2              # interactive knowledge-graph HTML (visualize)
-#   umap-learn>=0.5           # better 2D embedding map in the web app (PCA fallback otherwise)

@@ -14,19 +14,6 @@ Answer generation is intentionally treated as an external **Stage 7** service. A
 
 ---
 
-## Web app (developer mode)
-
-Beyond the CLI and the evidence-service API, CorpusRetrieve ships a **web application** that turns the pipeline into a glass box: upload a document, watch it flow through all six stages live, click any chunk to see the exact region of the source page it came from, and download portable artifacts (chunks.json, embeddings.jsonl, and the knowledge graph as JSON/Cypher/GraphML) to load into any vector database or graph store.
-
-```bash
-pip install -r requirements.txt
-EMBEDDER=hash uvicorn service.web:app --reload --port 8000   # then open http://localhost:8000
-```
-
-`EMBEDDER=hash` runs fully offline (no model downloads); use `bge-m3` for real embeddings. The React/Babel assets are vendored under `service/static/vendor/`, so the UI needs no internet. Full details in [`service/WEB_README.md`](service/WEB_README.md). The exported artifacts are verified in the test suite to load into Qdrant and Neo4j without hand-editing.
-
----
-
 ## Table of contents
 
 1. [System identity and naming](#system-identity-and-naming)

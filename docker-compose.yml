@@ -3,7 +3,7 @@
 services:
   api:
     build: .
-    ports: ["8001:8000"]   # evidence service (Stage 6). web app uses 8000.
+    ports: ["8000:8000"]
     environment:
       EMBEDDER: ${EMBEDDER:-auto}        # set to bge-m3 once baked into the image
       RERANKER: ${RERANKER:-auto}        # set to ce:BAAI/bge-reranker-v2-m3 for production
@@ -23,16 +23,6 @@ services:
     volumes: ["docparse_data:/data"]
     depends_on: [qdrant]
     command: ["python", "-c", "print('attach your queue consumer here'); import time; time.sleep(1e9)"]
-
-  # Stage-1 web app (developer mode): upload -> visualize pipeline -> download artifacts
-  web:
-    build: .
-    ports: ["8000:8000"]
-    environment:
-      EMBEDDER: ${EMBEDDER:-hash}   # hash = fully offline; bge-m3 for real embeddings
-      JOBS_DIR: /data/jobs
-    volumes: ["docparse_data:/data"]
-    command: ["uvicorn", "service.web:app", "--host", "0.0.0.0", "--port", "8000"]
 
   qdrant:
     image: qdrant/qdrant:latest

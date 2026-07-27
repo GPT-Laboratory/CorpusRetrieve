@@ -136,6 +136,16 @@ class ExtractionConfig:
     vector_figure_min_area: float = 20000.0   # pt² — ignore rules/ornaments
     vector_figure_min_dim: float = 60.0       # pt  — ignore thin separators
     figure_max_text_coverage: float = 0.25    # region mostly covered by text = a text box, not a figure
+    # figure-dominated pages (schematics, maps, posters, engineering drawings):
+    # a page that is mostly vector ink with little running text is one big
+    # figure, not a table. When detected, we keep the whole-page figure (for a
+    # VLM to read) and don't let phantom "tables" from grid/border lines
+    # suppress it. Heuristic: many vector paths, few text chars, and the paths
+    # span most of the page.
+    figure_dominant_detection: bool = True
+    figure_dominant_min_paths: int = 150      # dense line-art (schematics have 100s)
+    figure_dominant_max_chars: int = 4000     # little running text (labels only)
+    figure_dominant_min_coverage: float = 0.45  # vector cluster spans ≥45% of page
 
     # publisher/license noise — a DATA list, not logic; extend per corpus
     noise_patterns: tuple[str, ...] = (

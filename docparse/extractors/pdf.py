@@ -344,10 +344,39 @@ def _pymupdf_extract(path: str, cfg: ExtractionConfig, result: ExtractionResult)
         is_scanned = len(raw_text.strip()) < cfg.ocr_min_chars
         do_ocr = cfg.ocr == "on" or (cfg.ocr == "auto" and is_scanned)
 
+        # --- figure-dominant page detection (schematics / maps / drawings) ---
+        # Such pages are mostly vector ink with sparse label text; PyMuPDF's
+        # find_tables() misreads their grid/border/wires as page-spanning
+        # "tables", which then suppress the real (whole-page) figure. Detect
+        # this up front and treat the page as figure-first instead.
+        page_is_figure = False
+        page_fig_bbox = None
+        if cfg.figure_dominant_detection and cfg.extract_figures:
+            try:
+                n_paths = len(page.get_drawings())
+            except Exception:
+                n_paths = 0
+            n_chars = len(raw_text.strip())
+            if (n_paths >= cfg.figure_dominant_min_paths
+                    and n_chars <= cfg.figure_dominant_max_chars):
+                try:
+                    clusters = page.cluster_drawings()
+                except Exception:
+                    clusters = []
+                page_area = page.rect.width * page.rect.height or 1.0
+                for cr in clusters:
+                    cov = ((cr.x1 - cr.x0) * (cr.y1 - cr.y0)) / page_area
+                    if cov >= cfg.figure_dominant_min_coverage:
+                        page_is_figure = True
+                        page_fig_bbox = [cr.x0, cr.y0, cr.x1, cr.y1]
+                        break
+
         # --- tables first (their text blocks get suppressed) ---
+        # ...skipped on figure-dominant pages so drawing lines aren't mistaken
+        # for ruled tables (the small real title-block still surfaces as text).
         table_boxes: list[list[float]] = []
         table_els: list[Element] = []
-        if cfg.extract_tables:
+        if cfg.extract_tables and not page_is_figure:
             try:
                 for ti, t in enumerate(page.find_tables().tables):
                     rows = t.extract()
@@ -468,7 +497,26 @@ def _pymupdf_extract(path: str, cfg: ExtractionConfig, result: ExtractionResult)
                                            extractor="pymupdf", visual_ref=visual))
 
         # --- vector figures: charts/maps/diagrams drawn as paths, not raster images ---
-        if cfg.extract_figures and cfg.vector_figures:
+        if page_is_figure and page_fig_bbox is not None:
+            # figure-dominant page: emit the whole drawing as one figure and
+            # skip the normal cluster filtering (which the phantom tables and
+            # sheer size would otherwise trip). This is the element the VLM
+            # describes — the entire schematic / diagram.
+            visual = {"page": pno + 1, "bbox": page_fig_bbox, "source": "vector",
+                      "full_page": True}
+            if assets:
+                try:
+                    crop = page.get_pixmap(clip=fitz.Rect(page_fig_bbox), dpi=cfg.image_dpi)
+                    fp = os.path.join(assets, f"p{pno + 1}_page_figure.png")
+                    crop.save(fp)
+                    visual["image_path"] = fp
+                except Exception:
+                    pass
+            fig_els.append(Element(kind="figure", text="", page=pno + 1,
+                                   bbox=page_fig_bbox, extractor="pymupdf",
+                                   visual_ref=visual,
+                                   metadata={"vector": True, "full_page": True}))
+        elif cfg.extract_figures and cfg.vector_figures:
             try:
                 clusters = page.cluster_drawings()
             except Exception:
