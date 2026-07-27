@@ -27,13 +27,8 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 
 from service.pipeline_runner import PipelineRunner, new_job_id
 
-JOBS_DIR = Path(
-    os.getenv(
-        "JOBS_DIR",
-        str(Path(tempfile.gettempdir()) / "corpusretrieve" / "jobs"),
-    )
-)
-
+JOBS_DIR = Path(os.environ.get(
+    "JOBS_DIR", str(Path(tempfile.gettempdir()) / "corpusretrieve" / "jobs")))
 EMBEDDER = os.environ.get("EMBEDDER", "hash")
 JOBS_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -186,8 +181,65 @@ def get_graph(job_id: str, hide: str | None = "VectorPoint,Quantity,Unit,TableKV
 
 # --------------------------------------------------------------------- images
 
+@app.get("/api/jobs/{job_id}/projection")
+def get_projection(job_id: str):
+    """2D projection of the chunk embeddings for the embedding-map view.
+    Uses UMAP when available (best neighbourhood structure), else falls back to
+    PCA (fast, deterministic, no extra dependency). Cached on disk per job.
+    Points are colored/labeled by chunk type so the map ties back to the
+    typed-chunk model."""
+    jd = _runner.job_dir(job_id)
+    cache = jd / "projection.json"
+    if cache.exists():
+        return json.loads(cache.read_text(encoding="utf-8"))
+
+    src = jd / "embeddings.jsonl"
+    if not src.exists():
+        raise HTTPException(404, "embeddings not generated yet")
+    recs = [json.loads(l) for l in src.read_text(encoding="utf-8").splitlines() if l.strip()]
+    if not recs:
+        raise HTTPException(404, "no embedding records")
+
+    import numpy as np
+    X = np.array([r["vector"] for r in recs], dtype="float32")
+    method = "pca"
+    if len(recs) >= 4:
+        try:
+            import umap  # type: ignore
+            n_nb = min(15, len(recs) - 1)
+            xy = umap.UMAP(n_neighbors=n_nb, min_dist=0.1,
+                           n_components=2, random_state=42).fit_transform(X)
+            method = "umap"
+        except Exception:
+            from sklearn.decomposition import PCA
+            xy = PCA(n_components=2, random_state=42).fit_transform(X)
+    else:
+        xy = np.zeros((len(recs), 2), dtype="float32")
+
+    xy = np.asarray(xy, dtype="float32")
+    lo, hi = xy.min(0), xy.max(0)
+    span = np.where((hi - lo) == 0, 1.0, hi - lo)
+    norm = (xy - lo) / span                      # 0..1 for easy client scaling
+
+    points = []
+    for r, (x, y) in zip(recs, norm):
+        p = r.get("payload", {})
+        points.append({
+            "id": r["id"],
+            "chunk_id": p.get("chunk_id"),
+            "type": p.get("chunk_type"),
+            "x": round(float(x), 4), "y": round(float(y), 4),
+            "pages": p.get("pages"),
+            "text": (p.get("raw_text") or "")[:160],
+        })
+    out = {"method": method, "n": len(points), "points": points}
+    cache.write_text(json.dumps(out), encoding="utf-8")
+    return out
+
+
 @app.get("/api/jobs/{job_id}/page/{page_no}.png")
 def page_image(job_id: str, page_no: int, dpi: int = 120):
+    """Render a PDF page to PNG on demand for the overlay viewer. Cached on disk."""
     """Render a PDF page to PNG on demand for the overlay viewer. Cached on disk."""
     jd = _runner.job_dir(job_id)
     out = jd / "pages" / f"p{page_no}_{dpi}.png"

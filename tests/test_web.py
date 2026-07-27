@@ -198,3 +198,23 @@ def test_graph_hide_param_filters_types(client, finished_job):
     assert full["n_nodes"] >= hidden["n_nodes"]
     types_hidden = {n["type"] for n in hidden["nodes"]}
     assert "VectorPoint" not in types_hidden
+
+
+# ---- Stage 3: embedding projection for the UMAP/PCA map --------------------
+
+def test_projection_returns_2d_points(client, finished_job):
+    job, _ = finished_job
+    pr = client.get(f"/api/jobs/{job}/projection").json()
+    assert pr["method"] in ("umap", "pca")
+    assert pr["n"] > 0 and len(pr["points"]) == pr["n"]
+    # every point has normalized 2D coords in [0,1] and a chunk type
+    for p in pr["points"][:20]:
+        assert 0.0 <= p["x"] <= 1.0 and 0.0 <= p["y"] <= 1.0
+        assert p.get("type") and p.get("chunk_id")
+
+
+def test_projection_is_cached(client, finished_job):
+    job, _ = finished_job
+    a = client.get(f"/api/jobs/{job}/projection").json()
+    b = client.get(f"/api/jobs/{job}/projection").json()
+    assert a == b  # deterministic + cached on disk

@@ -3,18 +3,28 @@
 **Vendor-neutral. Portable chunks + embeddings + knowledge graph.**
 
 Upload a document and watch it become retrievable, grounded evidence — with
-nothing locked to us. Two modes serve two audiences from the same run:
+nothing locked to us. Three modes serve three audiences from the same run:
 
-- **Explain mode** (non-technical / demo): a plain-language, step-by-step
-  walkthrough of what happened to *your* document at each of the six stages,
-  ending in one-click downloads. Designed so a non-technical user can explain,
-  in their own words, what each stage does after a single walkthrough.
+- **Learn mode** (demo / onboarding): a guided, scroll-driven story — "how a
+  document becomes evidence" — with a sticky animation that transforms the
+  document through all six stages as you scroll, ending in an interactive
+  sandbox (drag chunk size, watch chunk count and the precision/context
+  trade-off update live) and one-click downloads.
+- **Explain mode** (non-technical): a plain-language, step-by-step walkthrough
+  of what happened to *your* document at each stage. Designed so a
+  non-technical user can explain, in their own words, what each stage does
+  after a single walkthrough.
 - **Inspect mode** (developer / debugging): the full pipeline spine with live
   timings, the source document with bounding-box provenance overlays, a
-  typed-chunk map, an interactive knowledge-graph explorer, per-chunk
-  inspection, and portable-artifact downloads with copy-paste load snippets.
+  typed-chunk map, an interactive knowledge-graph explorer, a 2D embedding map
+  (UMAP/PCA), per-chunk inspection, and portable-artifact downloads with
+  copy-paste load snippets.
 
 The mode toggle is persistent (remembered across sessions).
+
+> The 2D embedding map uses UMAP when `umap-learn` is installed (best
+> neighbourhood structure) and falls back to PCA otherwise — no required extra
+> dependency. `pip install umap-learn` to upgrade the projection.
 
 ## Run
 ```

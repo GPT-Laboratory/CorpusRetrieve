@@ -136,6 +136,27 @@
   .sdl a:hover{border-color:var(--teal)}
   .sdl a .cap{display:block;font-size:11px;color:var(--faint);margin-top:2px}
   .sarrow{text-align:center;color:var(--faint);font-size:18px;margin:-8px 0}
+
+  /* Stage 3: scrollytelling learn mode */
+  .scrolly{display:grid;grid-template-columns:minmax(360px,1fr) 1fr;gap:40px;max-width:1300px;margin:0 auto;padding:0 30px 40vh}
+  .scrolly-steps{display:flex;flex-direction:column;gap:52vh;padding:30vh 0}
+  .scrolly-step{opacity:.35;transition:opacity .4s, transform .4s;transform:translateY(8px);border-left:3px solid var(--border);padding-left:20px}
+  .scrolly-step.on{opacity:1;transform:none;border-left-color:var(--teal)}
+  .scrolly-step .icon{width:44px;height:44px;border-radius:10px;display:flex;align-items:center;justify-content:center;font-size:22px;margin-bottom:10px}
+  .scrolly-step h3{margin:0 0 6px;font-size:19px}
+  .scrolly-step p{margin:0;color:var(--dim);font-size:15px;line-height:1.65}
+  .scrolly-step .nums{margin-top:10px;font-family:var(--mono);font-size:12px;color:var(--teal)}
+  .scrolly-sticky{position:sticky;top:0;height:100vh;display:flex;align-items:center;justify-content:center}
+  .anim-wrap{width:100%;max-width:460px}
+  .anim-svg{width:100%;aspect-ratio:1;background:#0a0e14;border:1px solid var(--border);border-radius:14px}
+  .anim-cap{text-align:center;color:var(--dim);font-size:13px;margin-top:14px;min-height:36px;transition:.3s}
+  /* Stage 3: sandbox */
+  .sandbox{margin-top:16px;padding:16px;border:1px solid var(--border);border-radius:12px;background:var(--panel2)}
+  .sandbox input[type=range]{accent-color:var(--teal)}
+  .sandbox-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin:14px 0}
+  .sandbox-grid .sv{font-family:var(--mono);font-size:20px;color:var(--teal);font-weight:600}
+  .sandbox-grid .sl{font-size:11px;color:var(--faint);margin-top:2px}
+  .sandbox-bar{display:flex;gap:2px;align-items:flex-end;height:32px;margin-top:6px}
 </style>
 </head>
 <body>
@@ -255,6 +276,7 @@ function App(){
         {manifest && <span className="sub" style={{fontFamily:"var(--mono)",fontSize:11}}>
           {manifest.summary.pages}p · {manifest.summary.elements} elts · {manifest.summary.chunks} chunks · {manifest.summary.vectors} vec · {manifest.summary.graph_nodes} nodes</span>}
         <div className="modeswitch">
+          <button className={mode==="learn"?"on":""} onClick={()=>setMode("learn")}>Learn</button>
           <button className={mode==="simple"?"on":""} onClick={()=>setMode("simple")}>Explain</button>
           <button className={mode==="advanced"?"on":""} onClick={()=>setMode("advanced")}>Inspect</button>
         </div>
@@ -279,6 +301,16 @@ function App(){
         ? <>Watch, in plain language, how your document becomes searchable evidence — then download the results.</>
         : <>Watch it flow through all six stages, inspect every chunk’s source region,<br/>and download portable chunks + embeddings + knowledge graph.</>}</div>
     </div>);
+
+  // ============ LEARN (SCROLLYTELLING) MODE ============
+  if(mode==="learn"){
+    return (<div className="app">{header}
+      {!job ? (<div>{dropZone}
+        <div style={{textAlign:"center",color:"var(--faint)",fontSize:13,marginTop:-20,paddingBottom:30}}>
+          Learn mode walks you through how a document becomes searchable evidence — scroll to watch it happen, then try the sandbox at the end.</div></div>
+      ) : <LearnMode job={job} stages={stages} manifest={manifest} chunks={chunks} dl={dl} setMode={setMode}/>}
+    </div>);
+  }
 
   // ============ SIMPLE (EXPLAIN) MODE ============
   if(mode==="simple"){
@@ -360,14 +392,16 @@ function App(){
       {/* CENTER: source | chunks | graph */}
       <div className="col viewer">
         <div style={{display:"flex",alignItems:"center",gap:10,padding:"0 14px"}}>
-          <h2 style={{padding:"12px 0 8px"}}>{centerView==="source"?"Source · provenance overlay"+(dims?` · page ${page}`:""):centerView==="chunks"?"Typed-chunk map":"Knowledge graph"}</h2>
+          <h2 style={{padding:"12px 0 8px"}}>{centerView==="source"?"Source · provenance overlay"+(dims?` · page ${page}`:""):centerView==="chunks"?"Typed-chunk map":centerView==="embedding"?"Embedding map":"Knowledge graph"}</h2>
           <div style={{marginLeft:"auto",display:"flex",gap:4}}>
-            {["source","chunks","graph"].map(v=>
+            {["source","chunks","graph","embedding"].map(v=>
               <span key={v} className={"tab"+(centerView===v?" on":"")} style={{borderBottom:"1px solid var(--border)",borderRadius:6}}
                 onClick={()=>setCenterView(v)}>{v==="graph"&&graph?`graph (${graph.n_nodes})`:v}</span>)}
           </div>
         </div>
-        {centerView==="graph" ? (
+        {centerView==="embedding" ? (
+          <EmbeddingMap job={job} sel={sel} onSel={cid=>{const c=chunks.find(x=>x.chunk_id===cid);if(c)selectChunk(c);}}/>
+        ) : centerView==="graph" ? (
           graph ? <SigmaGraph graph={graph} sel={sel} dl={dl}/> :
             <div className="empty">Building knowledge graph…</div>
         ) : centerView==="chunks" ? (
@@ -596,6 +630,194 @@ function fmtDetail(stage,d){
   if(stage==="embed") return `${d.vectors} vectors · ${d.model}\ndim ${d.dim} · ${d.metric}`;
   if(stage==="graph") return `${d.nodes} nodes · ${d.edges} edges`;
   return "";
+}
+
+
+// ================= LEARN MODE: scrollytelling =================
+// Native IntersectionObserver scrollytelling (Scrollama pattern, no external
+// lib). A sticky visualization on the right transforms as the reader scrolls
+// through six narrative steps on the left — the "document becoming evidence"
+// animation (R2D3-style: the same particles persist and rearrange each step).
+function LearnMode({job,stages,manifest,chunks,dl,setMode}){
+  const [active,setActive]=useState(0);
+  const stepRefs=useRef([]);
+  const done = stages.filter(s=>s.status==="done").length;
+
+  useEffect(()=>{
+    const obs=new IntersectionObserver((entries)=>{
+      entries.forEach(e=>{ if(e.isIntersecting){
+        const i=Number(e.target.dataset.step); setActive(i);
+      }});
+    },{rootMargin:"-45% 0px -45% 0px",threshold:0});
+    stepRefs.current.forEach(el=>el&&obs.observe(el));
+    return ()=>obs.disconnect();
+  },[]);
+
+  const steps=["parse","extract","enrich","chunk","embed","graph"].map(n=>({name:n,...STAGE_INFO[n]}));
+
+  return (
+   <div style={{overflow:"auto",position:"relative"}}>
+     <div className="sbanner" style={{paddingTop:30}}>
+       <h2>How a document becomes evidence</h2>
+       <p>Scroll down. On the right, watch <b>{manifest?manifest.source:"your document"}</b> transform at each stage.</p>
+     </div>
+     <div className="scrolly">
+       <div className="scrolly-steps">
+         {steps.map((s,i)=>(
+           <div key={s.name} ref={el=>stepRefs.current[i]=el} data-step={i}
+                className={"scrolly-step"+(active===i?" on":"")}>
+             <div className="icon" style={{background:s.color+"22"}}>{s.icon}</div>
+             <h3>{s.title}</h3>
+             <p>{s.plain}</p>
+             {stages.find(x=>x.stage===s.name&&x.status==="done") &&
+               <div className="nums">✓ {s.d((stages.filter(x=>x.stage===s.name).pop()||{}).detail||{})}</div>}
+           </div>
+         ))}
+         <div ref={el=>stepRefs.current[6]=el} data-step={6} className={"scrolly-step"+(active===6?" on":"")}>
+           <div className="icon" style={{background:"#2dd4bf22"}}>🎛️</div>
+           <h3>Now try it yourself</h3>
+           <p>Chunk size is the single biggest lever in a RAG pipeline. Drag the slider to see how it changes the number of chunks, their average size, and the trade-off between precision and context.</p>
+           {manifest && <Sandbox chunks={chunks}/>}
+         </div>
+         <div ref={el=>stepRefs.current[7]=el} data-step={7} className="scrolly-step">
+           <div className="icon" style={{background:"#34d39922"}}>📦</div>
+           <h3>Take it anywhere</h3>
+           <p>Everything you just watched is downloadable and vendor-neutral — load it into any vector database or knowledge graph.</p>
+           {manifest && <div className="sdl" style={{justifyContent:"flex-start"}}>
+             <a href={dl("chunks")}>📦 Chunks<span className="cap">JSON</span></a>
+             <a href={dl("embeddings")}>🔢 Embeddings<span className="cap">JSONL</span></a>
+             <a href={dl("graph_json")}>🕸️ Graph<span className="cap">JSON</span></a>
+           </div>}
+           <button className="btn" style={{marginTop:12}} onClick={()=>setMode("advanced")}>Open the full inspector →</button>
+         </div>
+       </div>
+       <div className="scrolly-sticky">
+         <EvidenceAnim step={active} stages={stages}/>
+       </div>
+     </div>
+   </div>);
+}
+
+// R2D3-style persistent-particle animation: 60 dots that rearrange per stage.
+function EvidenceAnim({step,stages}){
+  const N=60;
+  const dots=useRef([...Array(N)].map((_,i)=>({i,seed:Math.random()}))).current;
+  const detail=name=>{const e=(stages||[]).filter(x=>x.stage===name).pop();return e&&e.detail||{};};
+  // layout functions per stage, all returning {x,y,c} in a 0..100 box
+  const layouts={
+    0:(d,i)=>({x:50+(d.seed-0.5)*8, y:8+(i/N)*84, c:"#3a4150"}),          // parse: a page column of faint lines
+    1:(d,i)=>{const cols=6;const c=i%cols,r=Math.floor(i/cols);           // extract: a grid of typed blocks
+      const palette=["#60a5fa","#34d399","#a78bfa","#fbbf24","#fb7185","#7dd3fc"];
+      return {x:16+c*12, y:14+r*8, c:palette[c]};},
+    2:(d,i)=>({x:20+(i%5)*15, y:16+Math.floor(i/5)*7,                     // enrich: colored by role bands
+      c:["#f59e0b","#60a5fa","#34d399","#a78bfa","#fb7185"][Math.floor(i/12)%5]}),
+    3:(d,i)=>{const g=Math.floor(i/8);                                    // chunk: 8-dot clusters
+      return {x:20+(g%3)*30+((i%8)%3)*5, y:20+Math.floor(g/3)*22+Math.floor((i%8)/3)*5,
+      c:["#60a5fa","#a78bfa","#34d399","#fbbf24","#fb7185","#c084fc","#7dd3fc"][g%7]};},
+    4:(d,i)=>{const a=d.seed*2*Math.PI,r=8+d.seed*34;                     // embed: scatter into vector space
+      return {x:50+Math.cos(a)*r, y:50+Math.sin(a)*r*0.9, c:"#7dd3fc"};},
+    5:(d,i)=>{const a=2*Math.PI*i/N,r=i===0?0:30;                         // graph: hub + spokes
+      return {x:50+ (i===0?0:Math.cos(a)*r), y:50+(i===0?0:Math.sin(a)*r), c:i===0?"#e63946":"#457b9d"};},
+    6:(d,i)=>({x:50+Math.cos(2*Math.PI*i/N)*32, y:50+Math.sin(2*Math.PI*i/N)*32, c:"#2dd4bf"}),
+    7:(d,i)=>({x:50+Math.cos(2*Math.PI*i/N)*32, y:50+Math.sin(2*Math.PI*i/N)*32, c:"#34d399"}),
+  };
+  const lay=layouts[Math.min(step,7)]||layouts[0];
+  const edges = step===5 ? dots.slice(1).map(d=>({x1:50,y1:50,x2:lay(d,d.i).x,y2:lay(d,d.i).y})) : [];
+  const caption=["Reading the document, page by page.",
+    "Finding every typed piece — headings, tables, figures, formulas.",
+    "Labelling roles and pulling out claims, numbers, citations.",
+    "Grouping into meaning-preserving chunks.",
+    "Turning each chunk into a vector — meaning becomes geometry.",
+    "Connecting everything into a knowledge graph.",
+    "Your turn — experiment below.",
+    "Portable results, ready to leave with you."][Math.min(step,7)];
+  return (
+    <div className="anim-wrap">
+      <svg viewBox="0 0 100 100" className="anim-svg">
+        {edges.map((e,i)=><line key={i} x1={e.x1} y1={e.y1} x2={e.x2} y2={e.y2} stroke="#2b313b" strokeWidth="0.3"/>)}
+        {dots.map(d=>{const p=lay(d,d.i);
+          return <circle key={d.i} cx={p.x} cy={p.y} r={step===5&&d.i===0?2.6:1.3} fill={p.c}
+            style={{transition:"cx .8s cubic-bezier(.4,0,.2,1), cy .8s cubic-bezier(.4,0,.2,1), fill .6s"}}/>;})}
+      </svg>
+      <div className="anim-cap">{caption}</div>
+    </div>);
+}
+
+// End-of-demo sandbox: adjust chunk size, watch downstream effects (estimated).
+function Sandbox({chunks}){
+  const [size,setSize]=useState(400);
+  // reconstruct approximate token stream from actual chunk tokens
+  const total=chunks.reduce((a,c)=>a+(c.token_estimate||0),0);
+  const nChunks=Math.max(1,Math.round(total/size));
+  const avg=Math.round(total/nChunks);
+  const overlapPct=15;
+  const effective=Math.round(nChunks*(1+overlapPct/100));
+  // qualitative trade-off read-out
+  const precision=size<=250?"high":size<=500?"balanced":"lower";
+  const context=size<=250?"fragmented":size<=500?"good":"very broad";
+  return (
+    <div className="sandbox">
+      <div style={{display:"flex",alignItems:"center",gap:12}}>
+        <span style={{fontFamily:"var(--mono)",fontSize:12,color:"var(--dim)"}}>chunk size</span>
+        <input type="range" min="120" max="900" step="20" value={size}
+          onChange={e=>setSize(Number(e.target.value))} style={{flex:1}}/>
+        <span style={{fontFamily:"var(--mono)",fontSize:13,color:"var(--teal)",width:70}}>{size} tok</span>
+      </div>
+      <div className="sandbox-grid">
+        <div><div className="sv">{effective}</div><div className="sl">chunks produced</div></div>
+        <div><div className="sv">{avg}</div><div className="sl">avg tokens/chunk</div></div>
+        <div><div className="sv" style={{color:precision==="high"?"#34d399":precision==="balanced"?"#fbbf24":"#fb7185"}}>{precision}</div><div className="sl">retrieval precision</div></div>
+        <div><div className="sv" style={{color:context==="good"?"#34d399":context==="fragmented"?"#fb7185":"#fbbf24"}}>{context}</div><div className="sl">context per hit</div></div>
+      </div>
+      <div className="sandbox-bar">
+        {[...Array(Math.min(effective,60))].map((_,i)=>
+          <span key={i} style={{flex:1,height:Math.max(6,Math.min(28,avg/20)),background:"#60a5fa55",borderBottom:"2px solid #60a5fa",borderRadius:2}}></span>)}
+      </div>
+      <div style={{fontSize:12,color:"var(--dim)",marginTop:8,lineHeight:1.5}}>
+        {size<=250 && "Small chunks → precise matches, but each hit carries little context; you may need to retrieve more of them."}
+        {size>250&&size<=500 && "This is the sweet spot for most corpora — enough context to be useful, tight enough to stay relevant."}
+        {size>500 && "Large chunks → lots of context per hit, but retrieval gets fuzzier and you waste tokens on irrelevant text."}
+      </div>
+      <div style={{fontSize:11,color:"var(--faint)",marginTop:6}}>Estimated from this document’s {total.toLocaleString()} tokens. Re-run with a different chunker to see real results.</div>
+    </div>);
+}
+
+// ================= EMBEDDING MAP (UMAP/PCA 2D) =================
+function EmbeddingMap({job,sel,onSel}){
+  const [proj,setProj]=useState(null); const [err,setErr]=useState(null);
+  const [tip,setTip]=useState(null);
+  useEffect(()=>{ setProj(null);setErr(null);
+    fetch(API+`/api/jobs/${job}/projection`).then(r=>r.ok?r.json():Promise.reject(r.status))
+      .then(setProj).catch(e=>setErr(String(e)));
+  },[job]);
+  if(err) return <div className="empty">Embedding map unavailable ({err}).</div>;
+  if(!proj) return <div className="empty">Projecting embeddings into 2D…</div>;
+  const types=[...new Set(proj.points.map(p=>p.type))];
+  const W=760,H=560,PAD=30;
+  return (<div style={{padding:"6px 14px"}}>
+    <div className="glegend">
+      {types.map(t=><span key={t} className="lg" style={{color:col(t)}}>
+        <span style={{display:"inline-block",width:8,height:8,borderRadius:8,background:col(t),marginRight:4}}></span>{t}</span>)}
+      <span style={{marginLeft:"auto",color:"var(--faint)",fontFamily:"var(--mono)",fontSize:11}}>{proj.method.toUpperCase()} · {proj.n} chunks</span>
+    </div>
+    <svg width="100%" viewBox={`0 0 ${W} ${H}`} style={{background:"#0a0e14",borderRadius:8,border:"1px solid var(--border)"}}>
+      {proj.points.map(p=>{
+        const x=PAD+p.x*(W-2*PAD), y=PAD+(1-p.y)*(H-2*PAD);
+        const on=sel&&sel.chunk_id===p.chunk_id;
+        return <circle key={p.id} cx={x} cy={y} r={on?6:3.5} fill={col(p.type)}
+          stroke={on?"#fff":"none"} strokeWidth={on?1.5:0} style={{cursor:"pointer",transition:".15s"}}
+          onMouseEnter={e=>setTip({p,x:e.clientX,y:e.clientY})} onMouseMove={e=>setTip({p,x:e.clientX,y:e.clientY})}
+          onMouseLeave={()=>setTip(null)} onClick={()=>onSel&&onSel(p.chunk_id)}/>;
+      })}
+    </svg>
+    <div style={{fontSize:11,color:"var(--faint)",marginTop:6,fontFamily:"var(--mono)"}}>
+      each dot = one chunk · nearby dots = similar meaning · color = type · click to open · 2D distances are approximate
+    </div>
+    {tip && <div className="spantip" style={{left:Math.min(tip.x+14,window.innerWidth-340),top:tip.y+14}}>
+      <div><b style={{color:col(tip.p.type)}}>{tip.p.type}</b>{tip.p.pages&&tip.p.pages.length?` · p${tip.p.pages.join(",")}`:""}</div>
+      <div style={{color:"var(--dim)",marginTop:3}}>{tip.p.text}…</div>
+    </div>}
+  </div>);
 }
 
 ReactDOM.createRoot(document.getElementById("root")).render(<App/>);
