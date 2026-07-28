@@ -218,3 +218,74 @@ def test_projection_is_cached(client, finished_job):
     a = client.get(f"/api/jobs/{job}/projection").json()
     b = client.get(f"/api/jobs/{job}/projection").json()
     assert a == b  # deterministic + cached on disk
+
+
+# ---- batch upload: multiple files / folders / zips --------------------------
+
+def test_batch_multi_file(client):
+    if PDF is None:
+        pytest.skip("no sample PDF")
+    with open(PDF, "rb") as fh:
+        data = fh.read()
+    r = client.post("/api/batches", files=[
+        ("files", ("a.pdf", data, "application/pdf")),
+        ("files", ("b.txt", b"hello world " * 20, "text/plain")),
+    ])
+    assert r.status_code == 200
+    j = r.json()
+    assert j["count"] == 2
+    names = {x["filename"] for x in j["jobs"]}
+    assert names == {"a.pdf", "b.txt"}
+
+
+def test_batch_zip_expands_and_skips_junk(client):
+    if PDF is None:
+        pytest.skip("no sample PDF")
+    import io
+    import zipfile
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr("docs/a.pdf", open(PDF, "rb").read())
+        zf.writestr("docs/.DS_Store", b"junk")
+        zf.writestr("docs/readme.md", b"# unsupported")
+        zf.writestr("docs/notes.txt", b"a real note " * 10)
+    buf.seek(0)
+    r = client.post("/api/batches",
+                    files=[("files", ("archive.zip", buf.read(), "application/zip"))])
+    assert r.status_code == 200
+    names = {x["filename"] for x in r.json()["jobs"]}
+    assert names == {"a.pdf", "notes.txt"}          # .DS_Store + .md dropped
+
+
+def test_batch_unsupported_only_rejected(client):
+    r = client.post("/api/batches",
+                    files=[("files", ("x.md", b"# md", "text/markdown"))])
+    assert r.status_code == 400
+
+
+def test_batch_status_and_download(client):
+    if PDF is None:
+        pytest.skip("no sample PDF")
+    data = open(PDF, "rb").read()
+    jobs = client.post("/api/batches", files=[
+        ("files", ("one.pdf", data, "application/pdf")),
+        ("files", ("two.txt", b"content here " * 15, "text/plain")),
+    ]).json()
+    batch_id = jobs["batch_id"]
+    # process each job
+    for j in jobs["jobs"]:
+        with client.stream("GET", f"/api/jobs/{j['job_id']}/stream") as s:
+            for _ in s.iter_lines():
+                pass
+    # status shows both done with summaries
+    st = client.get(f"/api/batches/{batch_id}").json()
+    assert all(j["done"] for j in st["jobs"])
+    assert all(j["summary"] for j in st["jobs"])
+    # download-all yields a zip with one folder per doc, 6 artifacts each
+    dl = client.get(f"/api/batches/{batch_id}/download")
+    assert dl.status_code == 200
+    import io
+    import zipfile
+    zf = zipfile.ZipFile(io.BytesIO(dl.content))
+    folders = {n.split("/")[0] for n in zf.namelist()}
+    assert len(folders) == 2 and len(zf.namelist()) == 12

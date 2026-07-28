@@ -40,6 +40,15 @@ Open http://localhost:8000
 
 ## What you can do
 1. **Upload** a PDF (or DOCX/HTML/XLSX/CSV/JSON/image/text) — drag-drop or button.
+   You can also upload **multiple files at once, a whole folder** (the "Folder"
+   button, recurses into subfolders), or a **.zip** (expanded server-side,
+   nested zips included). Junk like `.DS_Store`/`Thumbs.db`/`__MACOSX` is
+   skipped. When more than one document is uploaded it becomes a **batch**: each
+   file runs through the pipeline and appears in a switcher strip (amber dot =
+   processing, green = done). Click any finished file to open it, or use
+   **Download all** to get one zip with a folder of artifacts per document.
+   Batch API: `POST /api/batches`, `GET /api/batches/{id}`,
+   `GET /api/batches/{id}/download`.
 2. **Choose your view** with the persistent Explain ↔ Inspect toggle.
 3. **Explain mode**: read the six-stage plain-language walkthrough of your
    document, then download the results (chunks / embeddings / graph).

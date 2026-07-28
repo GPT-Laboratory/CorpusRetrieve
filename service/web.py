@@ -16,12 +16,15 @@ existing evidence-service endpoints live in service.app and are unaffected.
 """
 from __future__ import annotations
 
+import io
 import json
 import os
 import tempfile
+import zipfile
 from pathlib import Path
+from typing import List
 
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 
@@ -31,6 +34,12 @@ JOBS_DIR = Path(os.environ.get(
     "JOBS_DIR", str(Path(tempfile.gettempdir()) / "corpusretrieve" / "jobs")))
 EMBEDDER = os.environ.get("EMBEDDER", "hash")
 JOBS_DIR.mkdir(parents=True, exist_ok=True)
+
+# document types the pipeline can ingest; anything else in a folder/zip is skipped
+SUPPORTED_EXT = {".pdf", ".docx", ".html", ".htm", ".csv", ".xlsx",
+                 ".json", ".txt", ".png", ".jpg", ".jpeg"}
+# noise that shows up in folders/zips and should never become a job
+_IGNORE_NAMES = {".ds_store", "thumbs.db"}
 
 app = FastAPI(title="CorpusRetrieve web (Stage 1)", version="1.0",
               description="Upload a document, watch it become evidence, download "
@@ -65,6 +74,142 @@ async def create_job(file: UploadFile = File(...)):
         {"job_id": job_id, "filename": file.filename, "state": "uploaded"}),
         encoding="utf-8")
     return {"job_id": job_id, "filename": file.filename}
+
+
+# --------------------------------------------------------------- batch upload
+
+BATCHES_DIR = JOBS_DIR.parent / "batches"
+BATCHES_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def _spawn_job(filename: str, data: bytes) -> dict:
+    """Create one job dir from raw bytes; returns {job_id, filename}."""
+    job_id = new_job_id()
+    jd = _runner.job_dir(job_id)
+    suffix = Path(filename).suffix or ".bin"
+    (jd / f"source{suffix}").write_bytes(data)
+    (jd / "status.json").write_text(json.dumps(
+        {"job_id": job_id, "filename": filename, "state": "uploaded"}),
+        encoding="utf-8")
+    return {"job_id": job_id, "filename": filename}
+
+
+def _is_supported(name: str) -> bool:
+    base = Path(name).name.lower()
+    if base in _IGNORE_NAMES or base.startswith("._"):
+        return False
+    return Path(name).suffix.lower() in SUPPORTED_EXT
+
+
+def _expand_zip(data: bytes) -> list[tuple[str, bytes]]:
+    """Return [(filename, bytes)] for supported members of a zip, recursively.
+    Nested zips are expanded too; junk and unsupported files are skipped."""
+    out: list[tuple[str, bytes]] = []
+    try:
+        zf = zipfile.ZipFile(io.BytesIO(data))
+    except zipfile.BadZipFile:
+        return out
+    for info in zf.infolist():
+        if info.is_dir():
+            continue
+        name = info.filename
+        if Path(name).name.lower().startswith("__macosx"):
+            continue
+        try:
+            member = zf.read(info)
+        except Exception:
+            continue
+        if name.lower().endswith(".zip"):
+            out.extend(_expand_zip(member))
+        elif _is_supported(name):
+            out.append((Path(name).name, member))
+    return out
+
+
+@app.post("/api/batches")
+async def create_batch(files: List[UploadFile] = File(...)):
+    """Accept multiple files, a folder (browser sends its files), and/or zips.
+    Each supported document becomes its own job; zips are expanded. Returns the
+    batch id and the list of spawned jobs so the client can process each."""
+    batch_id = new_job_id()
+    jobs: list[dict] = []
+    skipped: list[str] = []
+
+    for f in files:
+        raw = await f.read()
+        name = f.filename or "upload.bin"
+        if name.lower().endswith(".zip"):
+            members = _expand_zip(raw)
+            if not members:
+                skipped.append(f"{name} (empty or no supported files)")
+            for mname, mdata in members:
+                jobs.append(_spawn_job(mname, mdata))
+        elif _is_supported(name):
+            jobs.append(_spawn_job(name, raw))
+        else:
+            skipped.append(name)
+
+    if not jobs:
+        raise HTTPException(
+            400, f"no supported documents found. Supported: "
+                 f"{', '.join(sorted(SUPPORTED_EXT))}. Skipped: {skipped}")
+
+    (BATCHES_DIR / f"{batch_id}.json").write_text(json.dumps(
+        {"batch_id": batch_id, "jobs": jobs, "skipped": skipped}),
+        encoding="utf-8")
+    return {"batch_id": batch_id, "count": len(jobs), "jobs": jobs,
+            "skipped": skipped}
+
+
+@app.get("/api/batches/{batch_id}")
+def get_batch(batch_id: str):
+    """Batch membership + per-job completion status (done if manifest exists)."""
+    meta_path = BATCHES_DIR / f"{batch_id}.json"
+    if not meta_path.exists():
+        raise HTTPException(404, "batch not found")
+    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    jobs = []
+    for j in meta["jobs"]:
+        jd = _runner.job_dir(j["job_id"])
+        manifest = jd / "manifest.json"
+        done = manifest.exists()
+        summary = None
+        if done:
+            summary = json.loads(manifest.read_text(encoding="utf-8")).get("summary")
+        jobs.append({**j, "done": done, "summary": summary})
+    return {"batch_id": batch_id, "jobs": jobs, "skipped": meta.get("skipped", [])}
+
+
+@app.get("/api/batches/{batch_id}/download")
+def download_batch(batch_id: str):
+    """Zip every finished job's artifacts into one archive, one folder per doc."""
+    meta_path = BATCHES_DIR / f"{batch_id}.json"
+    if not meta_path.exists():
+        raise HTTPException(404, "batch not found")
+    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    buf = io.BytesIO()
+    n_files = 0
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for j in meta["jobs"]:
+            jd = _runner.job_dir(j["job_id"])
+            if not (jd / "manifest.json").exists():
+                continue
+            stem = Path(j["filename"]).stem or j["job_id"]
+            folder = f"{stem}_{j['job_id'][:6]}"
+            for art in ("chunks.json", "embeddings.jsonl",
+                        "knowledge_graph.json", "knowledge_graph.cypher",
+                        "knowledge_graph.graphml", "extraction.json"):
+                p = jd / art
+                if p.exists():
+                    zf.write(p, f"{folder}/{art}")
+                    n_files += 1
+    if n_files == 0:
+        raise HTTPException(409, "no finished jobs to download yet")
+    buf.seek(0)
+    return StreamingResponse(
+        buf, media_type="application/zip",
+        headers={"Content-Disposition":
+                 f'attachment; filename="corpusretrieve_batch_{batch_id[:6]}.zip"'})
 
 
 # --------------------------------------------------------------------- stream

@@ -106,6 +106,21 @@
   .modeswitch{display:flex;gap:0;border:1px solid var(--border);border-radius:20px;overflow:hidden}
   .modeswitch button{background:transparent;border:none;color:var(--dim);padding:5px 14px;cursor:pointer;font-size:12px}
   .modeswitch button.on{background:var(--teal);color:#04211d;font-weight:600}
+  /* batch file switcher */
+  .batchbar{display:flex;align-items:center;gap:12px;padding:8px 20px;background:var(--panel2);border-bottom:1px solid var(--border);overflow-x:auto}
+  .batchbar .bb-label{font-size:11px;font-family:var(--mono);color:var(--dim);white-space:nowrap}
+  .bb-files{display:flex;gap:6px;flex:1;min-width:0}
+  .bb-file{display:flex;align-items:center;gap:6px;background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:4px 10px;font-size:12px;color:var(--dim);cursor:pointer;white-space:nowrap}
+  .bb-file.on{border-color:var(--teal);color:var(--ink)}
+  .bb-file.pending{opacity:.6;cursor:default}
+  .bb-file:not(.pending):hover{border-color:var(--teal)}
+  .bb-dot{width:8px;height:8px;border-radius:8px;background:var(--faint)}
+  .bb-file.done .bb-dot{background:var(--green)}
+  .bb-file.pending .bb-dot{background:var(--amber);animation:pulse 1s infinite}
+  @keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}
+  .bb-skip{font-size:11px;color:var(--faint);font-family:var(--mono);white-space:nowrap}
+  .bb-dl{font-size:12px;border:1px solid var(--teal);color:var(--teal);padding:5px 12px;border-radius:6px;text-decoration:none;white-space:nowrap}
+  .bb-dl:hover{background:var(--teal);color:#04211d}
   /* Stage 2: sigma graph */
   #sigma{width:100%;height:620px;background:#0a0e14;border:1px solid var(--border);border-radius:8px}
   .glegend{display:flex;flex-wrap:wrap;gap:8px;padding:6px 0}
@@ -202,6 +217,31 @@ const STAGE_INFO = {
 
 function Pill({t}){return <span className="pill" style={{background:col(t)+"22",color:col(t),border:"1px solid "+col(t)+"55"}}>{t}</span>;}
 
+// Strip showing every file in a batch: status dot + name, click a finished one
+// to open it in the workbench, plus a "download all" bundle button.
+function BatchBar({batch,busy,onOpen,activeJob}){
+  const doneCount=batch.jobs.filter(j=>j.done).length;
+  return (
+    <div className="batchbar">
+      <span className="bb-label">Batch · {doneCount}/{batch.jobs.length} done{busy?" · processing…":""}</span>
+      <div className="bb-files">
+        {batch.jobs.map((j,i)=>(
+          <button key={j.job_id}
+            className={"bb-file"+(j.job_id===activeJob?" on":"")+(j.done?" done":" pending")}
+            disabled={!j.done}
+            title={j.done?"Open "+j.filename:j.filename+" — processing…"}
+            onClick={()=>onOpen(i)}>
+            <span className="bb-dot"></span>{j.filename.length>26?j.filename.slice(0,24)+"…":j.filename}
+          </button>
+        ))}
+      </div>
+      {batch.skipped&&batch.skipped.length>0 &&
+        <span className="bb-skip" title={batch.skipped.join(", ")}>{batch.skipped.length} skipped</span>}
+      <a className="bb-dl" href={API+`/api/batches/${batch.batch_id}/download`}
+         style={busy?{opacity:.5,pointerEvents:"none"}:{}}>Download all</a>
+    </div>);
+}
+
 function App(){
   const [job,setJob]=useState(null);
   const [stages,setStages]=useState([]);
@@ -218,7 +258,10 @@ function App(){
   const [graph,setGraph]=useState(null);
   const [useVlm,setUseVlm]=useState(false);
   const [mode,setMode]=useState(()=>{try{return localStorage.getItem("cr_mode")||"advanced";}catch(e){return "advanced";}});
+  const [batch,setBatch]=useState(null);      // {batch_id, jobs:[{job_id,filename,done}], active}
+  const [batchBusy,setBatchBusy]=useState(false);
   const fileRef=useRef();
+  const folderRef=useRef();
 
   useEffect(()=>{ try{localStorage.setItem("cr_mode",mode);}catch(e){} },[mode]);
 
@@ -230,6 +273,67 @@ function App(){
     const r=await fetch(API+"/api/jobs",{method:"POST",body:fd});
     const j=await r.json();setJob(j.job_id);stream(j.job_id);
   }
+
+  // Multiple files / a folder / zip(s): create a batch, then process each job.
+  async function uploadBatch(fileList){
+    const files=Array.from(fileList||[]);
+    if(files.length===0) return;
+    // a single non-zip file behaves exactly like the normal single upload
+    if(files.length===1 && !/\.zip$/i.test(files[0].name)){ return upload(files[0]); }
+
+    setBatch(null);setBatchBusy(true);
+    setStages([]);setManifest(null);setChunks([]);setSel(null);setElements({});setHiEls([]);setGraph(null);setCenterView("source");
+    const fd=new FormData();
+    files.forEach(f=>fd.append("files",f,f.name));
+    let res;
+    try{ res=await (await fetch(API+"/api/batches",{method:"POST",body:fd})).json(); }
+    catch(e){ setBatchBusy(false); alert("Batch upload failed."); return; }
+    if(!res.jobs || !res.jobs.length){ setBatchBusy(false); alert("No supported documents found in that selection."); return; }
+
+    const b={batch_id:res.batch_id, jobs:res.jobs.map(j=>({...j,done:false})), skipped:res.skipped||[], active:0};
+    setBatch(b); setJob(res.jobs[0].job_id);
+
+    // process each job sequentially (one pipeline at a time keeps it light)
+    for(let i=0;i<res.jobs.length;i++){
+      await processJob(res.jobs[i].job_id, i===0);
+      setBatch(prev=>prev?{...prev, jobs:prev.jobs.map((j,k)=>k===i?{...j,done:true}:j)}:prev);
+    }
+    setBatchBusy(false);
+  }
+
+  // Run one job's pipeline to completion. `openInView` wires the live stage
+  // spine + results to the main workbench (used for the first / active job).
+  function processJob(jobId, openInView){
+    return new Promise(resolve=>{
+      const es=new EventSource(API+`/api/jobs/${jobId}/stream?describe_figures=${useVlm?1:0}`);
+      const queue=[];let draining=false;
+      const drain=()=>{if(draining||!queue.length)return;draining=true;const d=queue.shift();
+        if(openInView) setStages(prev=>[...prev,d]);
+        const dwell=openInView?(d.status==="started"?300:180):0;
+        setTimeout(()=>{draining=false;drain();},dwell);};
+      es.addEventListener("stage",e=>{queue.push(JSON.parse(e.data));drain();});
+      es.addEventListener("manifest",e=>{ if(openInView) setManifest(JSON.parse(e.data)); });
+      es.addEventListener("done",()=>{es.close();
+        const w=()=>{if(queue.length||draining){setTimeout(w,150);return;} if(openInView) loadResults(jobId); resolve();};w();});
+      es.addEventListener("error",()=>{es.close();resolve();});
+    });
+  }
+
+  // Switch the workbench to a different (already-finished) file in the batch.
+  async function openBatchJob(idx){
+    if(!batch||!batch.jobs[idx]||!batch.jobs[idx].done) return;
+    const jobId=batch.jobs[idx].job_id;
+    setJob(jobId);setSel(null);setElements({});setHiEls([]);setGraph(null);setCenterView("source");setStages([]);
+    setBatch(prev=>({...prev,active:idx}));
+    // rebuild the stage spine from the manifest (already-run), then results
+    const man=await (await fetch(API+`/api/jobs/${jobId}/manifest`)).json();
+    setManifest(man);
+    const doneStages=(man.stages_completed||["parse","extract","enrich","chunk","embed","graph"])
+      .map((s,i)=>({stage:s,status:"done",index:i}));
+    setStages(doneStages);
+    loadResults(jobId);
+  }
+
   function stream(jobId){
     const es=new EventSource(API+`/api/jobs/${jobId}/stream?describe_figures=${useVlm?1:0}`);
     const queue=[];let draining=false;
@@ -280,13 +384,16 @@ function App(){
           <button className={mode==="simple"?"on":""} onClick={()=>setMode("simple")}>Explain</button>
           <button className={mode==="advanced"?"on":""} onClick={()=>setMode("advanced")}>Inspect</button>
         </div>
-        <input ref={fileRef} type="file" style={{display:"none"}}
-          accept=".pdf,.docx,.html,.htm,.csv,.xlsx,.json,.txt,.png,.jpg,.jpeg"
-          onChange={e=>e.target.files[0]&&upload(e.target.files[0])}/>
+        <input ref={fileRef} type="file" multiple style={{display:"none"}}
+          accept=".pdf,.docx,.html,.htm,.csv,.xlsx,.json,.txt,.png,.jpg,.jpeg,.zip"
+          onChange={e=>{if(e.target.files.length)uploadBatch(e.target.files);e.target.value="";}}/>
+        <input ref={folderRef} type="file" webkitdirectory="" directory="" multiple style={{display:"none"}}
+          onChange={e=>{if(e.target.files.length)uploadBatch(e.target.files);e.target.value="";}}/>
         {mode==="advanced" && <label style={{fontSize:11,color:"var(--dim)",display:"flex",alignItems:"center",gap:5,cursor:"pointer"}}
           title="Describe figures with a vision model (Claude). Needs ANTHROPIC_API_KEY; adds latency & cost.">
           <input type="checkbox" checked={useVlm} onChange={e=>setUseVlm(e.target.checked)}/>describe figures (VLM)</label>}
-        <button className="btn primary" onClick={()=>fileRef.current.click()}>Upload document</button>
+        <button className="btn" disabled={batchBusy} onClick={()=>folderRef.current.click()} title="Upload a whole folder">Folder</button>
+        <button className="btn primary" disabled={batchBusy} onClick={()=>fileRef.current.click()}>{batchBusy?"Processing…":"Upload files"}</button>
       </div>
     </header>);
 
@@ -294,12 +401,15 @@ function App(){
     <div className={"drop"+(dropHot?" hot":"")}
       onDragOver={e=>{e.preventDefault();setDropHot(true);}}
       onDragLeave={()=>setDropHot(false)}
-      onDrop={e=>{e.preventDefault();setDropHot(false);if(e.dataTransfer.files[0])upload(e.dataTransfer.files[0]);}}>
-      <div style={{fontSize:16,marginBottom:8}}>Drop a document here, or use “Upload document”.</div>
-      <div>PDF · DOCX · HTML · XLSX · CSV · JSON · images · text<br/>
+      onDrop={e=>{e.preventDefault();setDropHot(false);
+        const fs=e.dataTransfer.files;
+        if(fs.length>1||(fs.length===1&&/\.zip$/i.test(fs[0].name))) uploadBatch(fs);
+        else if(fs.length===1) upload(fs[0]);}}>
+      <div style={{fontSize:16,marginBottom:8}}>Drop a document, several files, a folder, or a .zip here — or use the buttons above.</div>
+      <div>PDF · DOCX · HTML · XLSX · CSV · JSON · images · text · .zip<br/>
       {mode==="simple"
         ? <>Watch, in plain language, how your document becomes searchable evidence — then download the results.</>
-        : <>Watch it flow through all six stages, inspect every chunk’s source region,<br/>and download portable chunks + embeddings + knowledge graph.</>}</div>
+        : <>Upload one file or many. Each becomes portable chunks + embeddings + a knowledge graph you can download.</>}</div>
     </div>);
 
   // ============ LEARN (SCROLLYTELLING) MODE ============
@@ -359,6 +469,7 @@ function App(){
   // ============ ADVANCED (INSPECT) MODE ============
   return (
   <div className="app">{header}
+    {batch && <BatchBar batch={batch} busy={batchBusy} onOpen={openBatchJob} activeJob={job}/>}
     <div className="spine">
       {["parse","extract","enrich","chunk","embed","graph"].map((name,i)=>{
         const s=stageState(name);
