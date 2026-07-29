@@ -72,7 +72,13 @@ def extract_path(path: str, config: ExtractionConfig | None = None) -> list[Extr
         results: list[ExtractionResult] = []
         for fp in sorted(p.rglob("*")):
             if fp.is_file() and not any(s in str(fp) for s in _SKIP):
-                results.append(extract(str(fp), config))
+                try:
+                    results.append(extract(str(fp), config))
+                except Exception as exc:  # keep going through the directory,
+                                          # mirroring extract_zip's per-member isolation
+                    r = ExtractionResult(source=str(fp))
+                    r.warnings.append(f"extraction failed: {exc}")
+                    results.append(r)
         return results
     if p.suffix.lower() == ".zip":
         return extract_zip(str(p), config)

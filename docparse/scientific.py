@@ -43,6 +43,23 @@ _HYPH_BREAK = re.compile(r"([A-Za-zÀ-ÖØ-öø-ÿ]+)-\s+([A-Za-zÀ-ÖØ-öø-ÿ
 
 _MATH_SYMBOLS = set("≤≥±×÷∑∏∫√ΔδσμλνΦφθτ≈≠≡→←∂∞∝∈")
 _EQ_NUM = re.compile(r"^\(\d{1,2}\)\s*|\s*\(\d{1,2}\)\s*$")
+_PUB_YEAR = re.compile(r"\b(?:19|20)\d{2}\b")
+
+
+def _looks_like_reference_entry(text: str) -> bool:
+    """True when a numbered short line looks like a bibliography/reference-
+    list entry: either it has no real
+    expression content once the "(N)" marker is stripped (a bare number is
+    not a formula), or it contains a publication year and no math symbol at
+    all, which is the fingerprint of a "(N) Author. Title. Year." citation
+    line in essentially any language -- publication years are universal even
+    where heading vocabulary is not."""
+    stripped = _EQ_NUM.sub("", text).strip()
+    if not stripped:
+        return True
+    has_symbol = any(c in _MATH_SYMBOLS for c in text)
+    has_year = bool(_PUB_YEAR.search(text))
+    return has_year and not has_symbol
 
 
 def _strip_soft(text: str) -> str:
@@ -86,6 +103,8 @@ def _looks_like_equation(text: str, cfg: ExtractionConfig) -> bool:
     words = len(text.split())
     symbols = sum(text.count(s) for s in _MATH_SYMBOLS)
     numbered = bool(_EQ_NUM.search(text))
+    if numbered and _looks_like_reference_entry(text):
+        return False
     return (numbered and (symbols >= 1 or words <= 12)) or (symbols >= 2 and words <= 30)
 
 
@@ -334,16 +353,37 @@ def clean(result: ExtractionResult, cfg: ExtractionConfig) -> ExtractionResult:
 # --------------------------------------------------------------------------- annotate
 
 _ROLE_RULES = [
-    ("abstract", r"abstract|summary of the (paper|study)"),
-    ("references", r"^references?$|^bibliography$|^literature cited$"),
-    ("acknowledgements", r"acknowledg"),
-    ("appendix", r"^appendi|supplementary|supporting information"),
-    ("funding", r"funding"),
-    ("methods", r"method|data and|materials|experimental setup|model description|indices"),
-    ("results", r"result|finding"),
-    ("discussion", r"discussion"),
-    ("conclusion", r"conclusion|concluding|summary$"),
-    ("introduction", r"introduction|background"),
+    # NOTE on scope (see BUG-3): this table was purely English-language regex,
+    # so role/claim/reference detection silently produced almost nothing on
+    # non-English documents despite correct language detection. Finnish
+    # equivalents are added below and verified against a real 89-page Finnish
+    # report used in this test pass (headings "Tiivistelmä", "Johdanto",
+    # "Viitteet" are now correctly recognized). This is a deliberately scoped
+    # fix: a defined synonym list for one additional language, not universal
+    # translation or true language-agnostic detection. Extending to further
+    # languages should follow the same pattern -- add verified synonyms per
+    # language rather than attempting automatic translation.
+    #
+    # Finnish additions use \b word-boundary anchoring (rather than a bare
+    # substring, as several of the pre-existing English patterns use) because
+    # Finnish's agglutinative compounding makes bare-stem substring matches
+    # much more likely to accidentally fire inside an unrelated word: e.g. a
+    # bare "menetelm" substring matches inside "hoitomenetelmillä" ("[with]
+    # treatment methods"), an ordinary word in running prose, not a "Methods"
+    # section heading. \b before the stem rejects that fused-compound case
+    # while still matching a real heading like "3.2 Menetelmät".
+    ("abstract", r"abstract|summary of the (paper|study)|\btiivistelmä"),
+    ("references", r"^references?$|^bibliography$|^literature cited$"
+                   r"|^viitteet$|^lähteet$|^kirjallisuus$"),
+    ("acknowledgements", r"acknowledg|\bkiitokset"),
+    ("appendix", r"^appendi|supplementary|supporting information|^liite\b"),
+    ("funding", r"funding|\brahoitus"),
+    ("methods", r"method|data and|materials|experimental setup|model description|indices"
+                r"|\bmenetelm"),
+    ("results", r"result|finding|\btulokset"),
+    ("discussion", r"discussion|\bpohdinta"),
+    ("conclusion", r"conclusion|concluding|summary$|\bjohtopäätök|\byhteenveto"),
+    ("introduction", r"introduction|background|\bjohdanto"),
 ]
 
 

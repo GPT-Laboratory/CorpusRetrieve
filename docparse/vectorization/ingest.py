@@ -39,6 +39,8 @@ class IngestResult:
     validation: dict = field(default_factory=dict)
     exports: dict = field(default_factory=dict)
     timings: dict = field(default_factory=dict)
+    doc_ids: list[str] = field(default_factory=list)   # all documents actually ingested
+    warnings: list[str] = field(default_factory=list)
 
 
 def _buckets(chunks: list[dict], size: int) -> list[list[dict]]:
@@ -54,12 +56,36 @@ def ingest(chunks_path: str | Path, cfg: IngestConfig | None = None,
     cfg = cfg or IngestConfig()
     t0 = time.time()
     data = json.loads(Path(chunks_path).read_text(encoding="utf-8"))
-    doc = data[0] if isinstance(data, list) else data
-    chunks = [normalize_chunk(c) for c in doc["chunks"]]
-    if not cfg.include_references:
-        chunks = [c for c in chunks if c["chunk_type"] != "reference"]
+    # BUG-8 fix: a chunks.json from Stage 4 batch processing (e.g. a directory
+    # or zip of several source documents) is a *list* of per-document chunk
+    # bundles. This used to silently take only data[0] and drop every other
+    # document with no warning at all -- an operator ingesting 50 documents
+    # would see a normal-looking successful report with 49 documents simply
+    # gone. Every document in the list is now actually ingested; a warning is
+    # still recorded (not just silently handled) so this remains visible.
+    docs = data if isinstance(data, list) else [data]
+    warnings: list[str] = []
+    if len(docs) > 1:
+        warnings.append(
+            f"{len(docs)} documents were present in {chunks_path}; all {len(docs)} "
+            "were ingested into this shared vector store / knowledge graph."
+        )
+    doc = docs[0]
+
+    all_chunks: list[dict] = []
+    per_doc_chunks: list[tuple[dict, list[dict]]] = []
+    for d in docs:
+        d_chunks = [normalize_chunk(c) for c in d["chunks"]]
+        if not cfg.include_references:
+            d_chunks = [c for c in d_chunks if c["chunk_type"] != "reference"]
+        per_doc_chunks.append((d, d_chunks))
+        all_chunks.extend(d_chunks)
+    chunks = all_chunks
 
     emb = embedder or resolve_embedder(cfg.embedder)
+    # Fit the sparse (BM25) encoder on the full combined corpus across all
+    # documents -- correct IDF statistics need the whole corpus, not just the
+    # first document's chunks.
     sparse = BM25SparseEncoder().fit(c["canonical_text"] for c in chunks)
     store = VectorStore(cfg.db_location, dense_dim=emb.dim)
     store.ensure_collections()
@@ -81,13 +107,23 @@ def ingest(chunks_path: str | Path, cfg: IngestConfig | None = None,
     counts = store.upsert_chunks(records)
     t2 = time.time()
 
+    # Build the knowledge graph once per document (not once over the merged
+    # chunk list) so each document gets its own correctly-scoped Paper node
+    # and section tree, rather than every document's chunks being incorrectly
+    # attributed to a single Paper node. KnowledgeGraph.build_from_chunks()'s
+    # returned stats are cumulative totals over the whole graph object, so the
+    # final call's graph_stats already reflects the combined total across all
+    # documents processed so far.
     kg = KnowledgeGraph()
-    doc_norm = dict(doc)
-    doc_norm["chunks"] = chunks
-    graph_stats = kg.build_from_chunks(doc_norm, cfg.tenant, emb.name, cfg.embed_version)
+    graph_stats: dict = {}
+    for d, d_chunks in per_doc_chunks:
+        doc_norm = dict(d)
+        doc_norm["chunks"] = d_chunks
+        graph_stats = kg.build_from_chunks(doc_norm, cfg.tenant, emb.name, cfg.embed_version)
     t3 = time.time()
 
-    res = IngestResult(doc_id=doc["doc_id"], collections=counts, graph_stats=graph_stats)
+    res = IngestResult(doc_id=doc["doc_id"], collections=counts, graph_stats=graph_stats,
+                       doc_ids=[d["doc_id"] for d in docs], warnings=warnings)
     res.validation = validate(store, kg, chunks, emb, sparse)
     if cfg.graph_outdir:
         res.exports = kg.export(cfg.graph_outdir)

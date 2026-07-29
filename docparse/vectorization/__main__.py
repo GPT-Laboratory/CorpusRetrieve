@@ -25,7 +25,8 @@ def main() -> int:
     from docparse.vectorization.ingest import resolve_embedder
     emb = resolve_embedder(args.embedder)
 
-    print(json.dumps({"doc_id": res.doc_id, "collections": res.collections,
+    print(json.dumps({"doc_id": res.doc_id, "doc_ids": res.doc_ids,
+                      "warnings": res.warnings, "collections": res.collections,
                       "graph": res.graph_stats, "validation": res.validation,
                       "exports": res.exports, "timings": res.timings},
                      ensure_ascii=False, indent=2))

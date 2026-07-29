@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import sys
 
@@ -81,10 +82,20 @@ def main(argv: list[str] | None = None) -> int:
         args.assets = "assets"                    # crops must exist on disk for the VLM
     cfg = _build_config(args)
     all_results = []
-    for path in args.paths:
-        all_results.extend(extract_path(path, cfg))
-    for r in all_results:
-        _maybe_describe(r, args)
+    # Some third-party libraries used during extraction (e.g. PyMuPDF's
+    # find_tables(), which prints a one-time "Consider using the
+    # pymupdf_layout package..." notice directly to sys.stdout on first use)
+    # write to stdout themselves. Since --json/--chunks write machine-readable
+    # output to stdout too, that stray print would land ahead of the JSON
+    # payload and corrupt it for anyone using the natural
+    # `python -m docparse --json file.pdf > out.json` shell-redirection
+    # pattern (see BUG-6). Redirect stdout to stderr for the extraction phase
+    # only; the actual payload is written to the real stdout afterward.
+    with contextlib.redirect_stdout(sys.stderr):
+        for path in args.paths:
+            all_results.extend(extract_path(path, cfg))
+        for r in all_results:
+            _maybe_describe(r, args)
 
     if args.chunks:
         from docparse.chunking import ChunkingConfig, chunk_result

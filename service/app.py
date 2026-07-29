@@ -78,6 +78,11 @@ async def extract_endpoint(file: UploadFile = File(...),
         cfg = ExtractionConfig(scientific=scientific,
                                table_serializations=("markdown", "kv"))
         return JSONResponse(extract(path, cfg).to_dict())
+    except Exception as exc:
+        # Extraction failures are almost always caused by the uploaded file
+        # itself (empty, corrupt, or mislabeled) rather than a server bug, so
+        # surface a 422 with a real message instead of a bare 500.
+        raise HTTPException(422, f"extraction failed: {exc}")
     finally:
         os.unlink(path)
 
@@ -90,6 +95,8 @@ async def chunk_endpoint(file: UploadFile = File(...)):
     try:
         result = extract(path, ExtractionConfig(table_serializations=("markdown", "kv")))
         return JSONResponse([chunk_result(result).to_dict()])
+    except Exception as exc:
+        raise HTTPException(422, f"chunking failed: {exc}")
     finally:
         os.unlink(path)
 
@@ -110,7 +117,8 @@ async def ingest_endpoint(file: UploadFile = File(...),
                            graph_outdir=str(INDEX_DIR))
         res, *_ = ingest(path, cfg)
         _RETRIEVER = None                    # force reload with new index
-        return JSONResponse({"doc_id": res.doc_id, "collections": res.collections,
+        return JSONResponse({"doc_id": res.doc_id, "doc_ids": res.doc_ids,
+                             "warnings": res.warnings, "collections": res.collections,
                              "graph": res.graph_stats, "validation": res.validation,
                              "timings": res.timings})
     except Exception as exc:

@@ -380,10 +380,25 @@ def _pymupdf_extract(path: str, cfg: ExtractionConfig, result: ExtractionResult)
             try:
                 for ti, t in enumerate(page.find_tables().tables):
                     rows = t.extract()
-                    bbox = list(t.bbox)
-                    table_boxes.append(bbox)
                     text, extras, structured, trunc = serialize_table(
                         rows, cfg.table_serializations, cfg.table_max_rows)
+                    if not structured.get("rows"):
+                        # False-positive candidate: PyMuPDF's "text" strategy found
+                        # only a single fragment "row" (e.g. wrapped multi-column
+                        # citation/reference text mistaken for a grid). Because
+                        # rows_to_structured() treats the first row as a header and
+                        # everything after as body, any single-row detection ends up
+                        # with zero body rows here -- that is the real signature of
+                        # these garbage detections (raw t.extract() is never
+                        # literally empty, so checking `rows` alone does not catch
+                        # this). Skip creating a table Element for it, and do NOT
+                        # register its bbox in table_boxes -- otherwise the
+                        # underlying real text would be suppressed from the normal
+                        # narrative text-block pass below and lost entirely instead
+                        # of being recovered as narrative text.
+                        continue
+                    bbox = list(t.bbox)
+                    table_boxes.append(bbox)
                     visual = {"page": pno + 1, "bbox": bbox}
                     if assets:
                         try:
@@ -630,10 +645,12 @@ def _pdfplumber_extract(path: str, cfg: ExtractionConfig, result: ExtractionResu
                 try:
                     for ti, t in enumerate(page.find_tables()):
                         rows = t.extract()
-                        bbox = list(t.bbox)
-                        table_boxes.append(bbox)
                         text, extras, structured, trunc = serialize_table(
                             rows, cfg.table_serializations, cfg.table_max_rows)
+                        if not structured.get("rows"):
+                            continue  # false-positive single-row detection; see pymupdf path fix above
+                        bbox = list(t.bbox)
+                        table_boxes.append(bbox)
                         meta = {"rows": len(rows), "truncated": trunc}
                         if extras:
                             meta["serializations"] = extras
