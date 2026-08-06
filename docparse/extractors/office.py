@@ -4,8 +4,8 @@ from __future__ import annotations
 import os
 import re
 
-from docparse.router import register
 from docparse.models import Element, ExtractionConfig, ExtractionResult
+from docparse.router import register
 from docparse.serialize import serialize_table
 
 _HEADING_RE = re.compile(r"heading\s*(\d+)", re.IGNORECASE)

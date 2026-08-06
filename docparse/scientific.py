@@ -353,25 +353,7 @@ def clean(result: ExtractionResult, cfg: ExtractionConfig) -> ExtractionResult:
 # --------------------------------------------------------------------------- annotate
 
 _ROLE_RULES = [
-    # NOTE on scope (see BUG-3): this table was purely English-language regex,
-    # so role/claim/reference detection silently produced almost nothing on
-    # non-English documents despite correct language detection. Finnish
-    # equivalents are added below and verified against a real 89-page Finnish
-    # report used in this test pass (headings "Tiivistelmä", "Johdanto",
-    # "Viitteet" are now correctly recognized). This is a deliberately scoped
-    # fix: a defined synonym list for one additional language, not universal
-    # translation or true language-agnostic detection. Extending to further
-    # languages should follow the same pattern -- add verified synonyms per
-    # language rather than attempting automatic translation.
-    #
-    # Finnish additions use \b word-boundary anchoring (rather than a bare
-    # substring, as several of the pre-existing English patterns use) because
-    # Finnish's agglutinative compounding makes bare-stem substring matches
-    # much more likely to accidentally fire inside an unrelated word: e.g. a
-    # bare "menetelm" substring matches inside "hoitomenetelmillä" ("[with]
-    # treatment methods"), an ordinary word in running prose, not a "Methods"
-    # section heading. \b before the stem rejects that fused-compound case
-    # while still matching a real heading like "3.2 Menetelmät".
+    # Word boundaries reduce false matches inside compound words.
     ("abstract", r"abstract|summary of the (paper|study)|\btiivistelmä"),
     ("references", r"^references?$|^bibliography$|^literature cited$"
                    r"|^viitteet$|^lähteet$|^kirjallisuus$"),

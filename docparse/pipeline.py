@@ -6,11 +6,11 @@ import tempfile
 import zipfile
 from pathlib import Path
 
-from docparse.router import get_extractor
-from docparse.detect import detect_type
-from docparse.postprocess import finalize
 from docparse import scientific
+from docparse.detect import detect_type
 from docparse.models import ExtractionConfig, ExtractionResult
+from docparse.postprocess import finalize
+from docparse.router import get_extractor
 
 _SKIP = ("__MACOSX", ".DS_Store")
 

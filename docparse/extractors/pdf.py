@@ -17,8 +17,8 @@ import re
 from collections import Counter
 from statistics import median
 
-from docparse.router import register
 from docparse.models import Element, ExtractionConfig, ExtractionResult
+from docparse.router import register
 from docparse.serialize import serialize_table
 
 try:

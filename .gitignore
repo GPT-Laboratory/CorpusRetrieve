@@ -1,52 +1,16 @@
-# ---- Python ----
-__pycache__/
-*.py[cod]
-*$py.class
-*.egg-info/
-.eggs/
-dist/
-build/
-*.egg
-
-# ---- Virtual environments ----
+.env
 .venv/
 venv/
-env/
-ENV/
-.env
-
-# ---- Test / tooling caches ----
+__pycache__/
+*.py[cod]
 .pytest_cache/
 .ruff_cache/
-.mypy_cache/
 .coverage
-.coverage.*
 htmlcov/
-.tox/
-
-# ---- docparse output (generated, not source) ----
-report.json
-chunks.json
-*.out.json
-assets/
-index/
-out/
-output/
-vectorization_output/
-kg.html
-
-# ---- Jupyter ----
-.ipynb_checkpoints/
-
-# ---- OS noise ----
-.DS_Store
-Thumbs.db
-desktop.ini
-
-# ---- Editors / IDEs ----
-.vscode/
-.idea/
-*.swp
-*~
-
-mydocs/
+dist/
+build/
+*.egg-info/
+api-test-output/
+data/
+tmp/
+*.log

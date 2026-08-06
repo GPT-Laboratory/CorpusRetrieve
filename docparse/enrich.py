@@ -159,7 +159,7 @@ def _resolve_api_key(api_key: str | None) -> str:
 def make_anthropic_describer(model: str = "claude-sonnet-4-6", api_key: str | None = None,
                              max_tokens: int = 1600):
     """Reference implementation using the Anthropic API (pip install anthropic)."""
-    import anthropic                                    # optional dependency
+    import anthropic  # optional dependency
     client = anthropic.Anthropic(api_key=_resolve_api_key(api_key))
 
     def describe(image_path: str, context: str = "") -> str:

@@ -1,8 +1,8 @@
 """Image extractor: preprocessed, orientation-corrected OCR with per-line bboxes."""
 from __future__ import annotations
 
-from docparse.router import register
 from docparse.models import Element, ExtractionConfig, ExtractionResult
+from docparse.router import register
 
 
 class ImageExtractor:
@@ -18,6 +18,7 @@ class ImageExtractor:
             visual_ref={"image_path": path, "width": img.size[0], "height": img.size[1]}))
         if cfg.ocr in ("auto", "on"):
             import io
+
             from docparse.extractors.pdf import _ocr_lines
             buf = io.BytesIO()
             img.save(buf, format="PNG")

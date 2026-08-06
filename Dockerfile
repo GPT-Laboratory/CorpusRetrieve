@@ -1,27 +1,41 @@
-# Multi-stage: bake the embedding model into the image so first request is fast.
-FROM python:3.12-slim AS base
-ENV PYTHONUNBUFFERED=1 PIP_NO_CACHE_DIR=1
-WORKDIR /app
+FROM python:3.12-slim AS runtime
 
-# system deps: `file` for type detection, tesseract for OCR, poppler for pdf
+ARG VERSION=1.0.0
+ARG INSTALL_BGE=false
+
+LABEL org.opencontainers.image.title="CorpusRetrieve" \
+      org.opencontainers.image.description="Convert document corpora into portable retrieval artifacts" \
+      org.opencontainers.image.version="${VERSION}"
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1
+
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      file tesseract-ocr libtesseract-dev poppler-utils \
+      curl \
+      tesseract-ocr \
+      tesseract-ocr-eng \
     && rm -rf /var/lib/apt/lists/*
 
+WORKDIR /app
+
 COPY requirements.txt .
-RUN pip install -r requirements.txt \
-    && pip install fastapi "uvicorn[standard]" python-multipart
+RUN pip install --upgrade pip && pip install -r requirements.txt
 
-# --- optional: bake BGE-M3 in (uncomment for production; ~2GB, slow build) ---
-# RUN pip install FlagEmbedding \
-#  && python -c "from FlagEmbedding import BGEM3FlagModel; BGEM3FlagModel('BAAI/bge-m3')"
-# ENV EMBEDDER=bge-m3
+COPY requirements-embeddings.txt .
+RUN if [ "$INSTALL_BGE" = "true" ]; then pip install -r requirements-embeddings.txt; fi
 
+COPY corpusretrieve ./corpusretrieve
 COPY docparse ./docparse
 COPY service ./service
+COPY VERSION pyproject.toml README.md ./
 
-ENV EMBEDDER=auto RERANKER=auto INDEX_DIR=/data/index
-VOLUME /data
+RUN useradd --create-home --uid 10001 corpusretrieve
+USER corpusretrieve
+
 EXPOSE 8000
-HEALTHCHECK --interval=30s --timeout=5s CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/healthz')"
-CMD ["uvicorn", "service.app:app", "--host", "0.0.0.0", "--port", "8000"]
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+  CMD curl --fail http://127.0.0.1:8000/v1/health || exit 1
+
+CMD ["python", "-m", "uvicorn", "service.app:app", "--host", "0.0.0.0", "--port", "8000"]

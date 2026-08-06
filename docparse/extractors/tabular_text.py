@@ -5,9 +5,9 @@ import json
 import re
 from pathlib import Path
 
-from docparse.router import register
 from docparse.encoding import detect_encoding, read_text
 from docparse.models import Element, ExtractionConfig, ExtractionResult
+from docparse.router import register
 from docparse.serialize import serialize_table
 
 _MD_HEADING = re.compile(r"^(#{1,6})\s+")

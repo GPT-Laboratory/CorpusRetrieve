@@ -1,6 +1,6 @@
-"""Type-aware canonicalization for Stage 5.
+"""Type-aware canonicalization for portable indexing.
 
-Two text views per chunk (the report's core normalization rule):
+Two text views are retained per chunk:
   raw_text        — untouched, for quoting/grounding/audit
   canonical_text  — what actually gets embedded: role-tagged, breadcrumbed,
                     unicode/whitespace-normalized
@@ -25,8 +25,7 @@ _TYPE_TAG = {
 
 
 def canonical_text(chunk: dict) -> str:
-    """Build the embed-view. chunk['embed_text'] already carries the breadcrumb
-    from Stage 4; here we add the role tag and normalize the surface form."""
+    """Build the normalized embedding view from a retrieval chunk."""
     base = chunk.get("embed_text") or chunk.get("text") or ""
     tag = _TYPE_TAG.get(chunk.get("chunk_type", ""), "CHUNK")
     role = chunk.get("role")
@@ -86,12 +85,13 @@ def normalize_chunk(chunk: dict) -> dict:
 
 def payload_for(chunk: dict, doc: dict, embed_model: str, embed_version: str,
                 tenant: str) -> dict[str, Any]:
-    """Vector-DB payload following the report's metadata index set. Small,
-    filterable, provenance-bearing; big raw text stays out of indexes but in
-    the payload for grounding."""
+    """Build a filterable, provenance-bearing vector payload."""
     md = chunk.get("metadata", {}) or {}
     return {
         "tenant_id": tenant,
+        "corpus_id": doc.get("corpus_id", "default"),
+        "external_id": doc.get("external_id"),
+        "document_metadata": doc.get("metadata", {}),
         "doc_id": chunk.get("doc_id") or doc.get("doc_id"),
         "chunk_id": chunk["chunk_id"],
         "chunk_type": chunk["chunk_type"],

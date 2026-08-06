@@ -1,52 +1,52 @@
-# Four-container topology from the analysis: api + worker + qdrant + neo4j.
-# For a minimal demo, `docker compose up api qdrant` is enough.
 services:
   api:
-    build: .
-    ports: ["8001:8000"]   # evidence service (Stage 6). web app uses 8000.
-    environment:
-      EMBEDDER: ${EMBEDDER:-auto}        # set to bge-m3 once baked into the image
-      RERANKER: ${RERANKER:-auto}        # set to ce:BAAI/bge-reranker-v2-m3 for production
-      QDRANT_URL: http://qdrant:6333     # server mode: concurrent ingest+search
-      INDEX_DIR: /data/index
-    volumes: ["docparse_data:/data"]
-    depends_on: [qdrant]
+    build:
+      context: .
+      args:
+        VERSION: 1.0.0
+        INSTALL_BGE: ${INSTALL_BGE:-false}
+    env_file: .env
+    command: python -m uvicorn service.app:app --host 0.0.0.0 --port 8000
+    ports:
+      - "8000:8000"
+    depends_on:
+      - redis
+      - minio
+    restart: unless-stopped
 
-  # Optional ingestion worker: same image, no HTTP port. Wire to a queue (Celery/RQ/
-  # arq) so large uploads don't block the API. Stub command shown.
   worker:
-    build: .
-    environment:
-      EMBEDDER: ${EMBEDDER:-auto}
-      QDRANT_URL: http://qdrant:6333
-      INDEX_DIR: /data/index
-    volumes: ["docparse_data:/data"]
-    depends_on: [qdrant]
-    command: ["python", "-c", "print('attach your queue consumer here'); import time; time.sleep(1e9)"]
+    build:
+      context: .
+      args:
+        VERSION: 1.0.0
+        INSTALL_BGE: ${INSTALL_BGE:-false}
+    env_file: .env
+    command: rq worker corpusretrieve --url ${REDIS_URL:-redis://redis:6379/0}
+    depends_on:
+      - redis
+      - minio
+    restart: unless-stopped
 
-  # Stage-1 web app (developer mode): upload -> visualize pipeline -> download artifacts
-  web:
-    build: .
-    ports: ["8000:8000"]
-    environment:
-      EMBEDDER: ${EMBEDDER:-hash}   # hash = fully offline; bge-m3 for real embeddings
-      JOBS_DIR: /data/jobs
-    volumes: ["docparse_data:/data"]
-    command: ["uvicorn", "service.web:app", "--host", "0.0.0.0", "--port", "8000"]
+  redis:
+    image: redis:7.4.10-alpine
+    command: redis-server --save 60 1 --loglevel warning
+    volumes:
+      - redis-data:/data
+    restart: unless-stopped
 
-  qdrant:
-    image: qdrant/qdrant:latest
-    ports: ["6333:6333"]
-    volumes: ["qdrant_data:/qdrant/storage"]
-
-  neo4j:
-    image: neo4j:5-community
-    ports: ["7474:7474", "7687:7687"]
+  minio:
+    image: minio/minio:RELEASE.2025-04-22T22-12-26Z
+    command: server /data --console-address ":9001"
     environment:
-      NEO4J_AUTH: neo4j/docparse123
-    volumes: ["neo4j_data:/data"]
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - artifact-data:/data
+    restart: unless-stopped
 
 volumes:
-  docparse_data:
-  qdrant_data:
-  neo4j_data:
+  artifact-data:
+  redis-data:

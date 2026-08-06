@@ -1,19 +1,16 @@
-"""Stage 5 embedding layer.
-
-Design (follows the Stage-5 report, adapted to reality):
+"""Dense and sparse embedding implementations.
 
 * Pluggable dense embedders behind one protocol. BGE-M3 is the recommended
   self-host primary (dense mode = normalized CLS + inner product), but model
   weights can't be assumed present in every environment, so the resolver
   degrades: FlagEmbedding BGE-M3 -> sentence-transformers -> HashingEmbedder,
-  a deterministic offline fallback good enough for tests, demos, and
-  plumbing validation (NOT for production relevance).
+  a deterministic offline fallback for tests and plumbing validation.
 * One sparse path: a BM25-style encoder fitted on the corpus at ingest and
   persisted (vocab + idf) so query-time encoding matches ingest-time. This is
   the "hybrid sparse+dense first stage" the evidence base insists on, without
   requiring a learned sparse model.
-* Everything emits L2-normalized dense vectors, so cosine == dot product and
-  the vector DB metric choice is uncontroversial.
+* Dense vectors are L2-normalized, allowing cosine similarity through a dot
+  product.
 """
 from __future__ import annotations
 
@@ -33,13 +30,11 @@ class Embedder(Protocol):
     def encode(self, texts: list[str]) -> list[list[float]]: ...
 
 
-# --------------------------------------------------------------------- dense
-
 @dataclass
 class HashingEmbedder:
     """Deterministic offline embedder: hashed char 3-5-grams + word unigrams,
     L2-normalized. Lexical-overlap similarity only — a plumbing fallback that
-    keeps the whole Stage 5 pipeline runnable and testable with no downloads."""
+    keeps the indexing pipeline runnable and testable with no downloads."""
     dim: int = 512
     name: str = "hashing-v1"
 
@@ -61,12 +56,12 @@ class HashingEmbedder:
 
 class BGEM3Embedder:
     """BGE-M3 dense mode via FlagEmbedding (pip install FlagEmbedding).
-    1024 dims, multilingual, 8k context — the report's self-host primary."""
+    1024 dimensions, multilingual, with long-context support."""
     name = "bge-m3"
     dim = 1024
 
     def __init__(self, model_name: str = "BAAI/bge-m3", use_fp16: bool = True):
-        from FlagEmbedding import BGEM3FlagModel      # lazy heavy import
+        from FlagEmbedding import BGEM3FlagModel  # lazy heavy import
         self._m = BGEM3FlagModel(model_name, use_fp16=use_fp16)
 
     def encode(self, texts: list[str]) -> list[list[float]]:
@@ -106,8 +101,6 @@ def resolve_embedder(spec: str = "auto") -> Embedder:
         return HashingEmbedder()
     raise ValueError(f"unknown embedder spec: {spec}")
 
-
-# --------------------------------------------------------------------- sparse
 
 _TOKEN = re.compile(r"[a-z][a-z0-9_-]+|\d+(?:\.\d+)?(?:°c|%)?")
 
