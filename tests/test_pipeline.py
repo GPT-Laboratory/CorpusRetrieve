@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import xml.etree.ElementTree as ET
 from pathlib import Path
 
 import pytest
@@ -11,6 +12,7 @@ from corpusretrieve.pipeline.artifacts import safe_identifier, unique_identifier
 from corpusretrieve.pipeline.previews import render_page_previews
 from corpusretrieve.pipeline.progress import StageTracker
 from corpusretrieve.web.projection import project_vectors
+from docparse.vectorization.graph import KnowledgeGraph
 
 
 def test_stage_tracker_reports_every_stage_in_order():
@@ -120,3 +122,21 @@ def test_projection_respects_the_point_limit():
 
 def test_projection_handles_an_empty_index():
     assert project_vectors([], limit=10) == {"method": "none", "n": 0, "points": []}
+
+
+def test_graphml_export_replaces_xml_invalid_control_characters(tmp_path: Path):
+    graph = KnowledgeGraph()
+    source = graph._node("paper:bad\x00id", "Paper", title="bad\x00title")
+    target = graph._node("chunk:bad\x0bid", "Chunk", text="bad\x0ctext")
+    graph._edge(source, target, "PAPER_HAS_CHUNK", evidence="bad\x01value")
+
+    paths = graph.export(tmp_path)
+    graphml = Path(paths["graphml"])
+    contents = graphml.read_text(encoding="utf-8")
+
+    ET.parse(graphml)
+    assert "\x00" not in contents
+    assert "\x0b" not in contents
+    assert "\x0c" not in contents
+    assert "\x01" not in contents
+    assert "\ufffd" in contents
