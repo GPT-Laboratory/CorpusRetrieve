@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Any
 
 from corpusretrieve.models import JobSpec
+from corpusretrieve.pipeline.corpus import CorpusRegistry
 from corpusretrieve.pipeline.indexing import EMBEDDING_VERSION
 from docparse.vectorization.canonical import normalize_chunk
 from docparse.vectorization.graph import KnowledgeGraph
@@ -17,19 +18,31 @@ GRAPH_ARTIFACTS = {
 
 
 def build_graph(
-    documents: list[dict[str, Any]],
+    registry: CorpusRegistry,
     output_dir: Path,
     spec: JobSpec,
     embedder_name: str,
+    on_progress=None,
 ) -> dict[str, Any]:
-    """Project every document's chunks into one corpus-level graph."""
+    """Project the corpus into one graph, reading documents one at a time.
+
+    Each document is loaded, projected, and released before the next is read.
+    The accumulated graph is the only structure that grows with corpus size,
+    and it holds identifiers and short labels rather than chunk text or
+    vectors.
+    """
     graph = KnowledgeGraph()
     summary: dict[str, Any] = {}
-    for document in documents:
+    for position, document in enumerate(registry.iter_documents(), start=1):
         projected = dict(document)
-        projected["chunks"] = [normalize_chunk(chunk) for chunk in document["chunks"]]
+        projected["chunks"] = [
+            normalize_chunk(chunk) for chunk in document.get("chunks", [])
+        ]
         summary = graph.build_from_chunks(
             projected, spec.corpus_name, embedder_name, EMBEDDING_VERSION
         )
+        if on_progress is not None:
+            on_progress(position)
+
     graph.export(output_dir / GRAPH_DIRECTORY)
     return {**summary, "artifacts": dict(GRAPH_ARTIFACTS)}

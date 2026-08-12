@@ -347,7 +347,7 @@ Invalid combinations fail fast at boot rather than at first request.
 | `CREDENTIAL_ENCRYPTION_KEY` | Fernet key; required when `JOB_MODE=rq` | empty |
 | `CREDENTIAL_TTL_SECONDS` | Lifetime of a per-request key | `1800` |
 | `MAX_UPLOAD_BYTES` | Per-file and per-ZIP limit | `104857600` |
-| `MAX_FILES_PER_JOB` | Documents per corpus | `100` |
+| `MAX_FILES_PER_JOB` | Documents per corpus | `2000` |
 | `MAX_CORPUS_UNCOMPRESSED_BYTES` | ZIP expansion limit | `524288000` |
 | `ARTIFACT_RETENTION_DAYS` | Object lifecycle for outputs | `7` |
 | `DELETE_INPUTS_AFTER_PROCESSING` | Remove uploads after the worker finishes | `true` |

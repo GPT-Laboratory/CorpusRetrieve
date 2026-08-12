@@ -210,3 +210,32 @@ def test_document_config_assigns_identifiers(client, text_document):
     documents = client.get(f"/v1/jobs/{job_id}/documents").json()["documents"]
     assert documents[0]["doc_id"] == "chosen-id"
     assert documents[0]["metadata"]["language"] == "en"
+
+
+def test_multipart_parser_allows_the_configured_file_count(client):
+    """Starlette caps multipart parts at 1000 by default, below MAX_FILES_PER_JOB.
+
+    Without the widened parser limit this submission fails with a framework
+    error before any application validation runs.
+    """
+    files = [
+        ("files", (f"d{index:05d}.txt", io.BytesIO(b"body"), "text/plain"))
+        for index in range(1200)
+    ]
+    response = client.post("/v1/jobs", files=files)
+    assert response.status_code == 202
+    assert response.json()["files_accepted"] == 1200
+
+
+def test_file_count_above_the_limit_returns_the_service_problem_document(client):
+    from corpusretrieve.config import get_settings
+
+    limit = get_settings().max_files_per_job
+    files = [
+        ("files", (f"d{index:05d}.txt", io.BytesIO(b"body"), "text/plain"))
+        for index in range(limit + 1)
+    ]
+    response = client.post("/v1/jobs", files=files)
+    assert response.status_code == 413
+    assert response.json()["code"] == "too-many-files"
+    assert response.headers["content-type"].startswith("application/problem+json")

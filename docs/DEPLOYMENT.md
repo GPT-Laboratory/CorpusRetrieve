@@ -83,10 +83,11 @@ several replicas behind a load balancer. Do not scale the API beyond one replica
 with memory backends, because job state would not be shared.
 
 Sizing notes: a worker needs enough memory for the largest single document plus
-its rendered previews. The document stages process one file at a time, but the
-index and graph stages hold all chunks for the corpus in memory, so
-`MAX_FILES_PER_JOB` and `MAX_CORPUS_UNCOMPRESSED_BYTES` are the levers that
-bound worker memory.
+its rendered previews and one embedding batch. Every stage streams documents
+from disk one at a time, so peak memory is largely independent of corpus size;
+`EMBEDDING_BATCH_SIZE` is the lever that bounds it. The knowledge graph is the
+one structure that still grows with the corpus, holding identifiers and short
+labels rather than chunk text.
 
 ## Operations
 
@@ -131,6 +132,8 @@ Also review `MAX_UPLOAD_BYTES`, `MAX_FILES_PER_JOB`, and
 | `503 artifact-storage-unavailable` | Object store unreachable or credentials mismatched |
 | Uploads succeed but outputs 404 | API and worker are using different `STORAGE_BACKEND` values |
 | `410 artifact-expired` | Retention lifecycle removed the objects. Resubmit |
+| Job `failed` but artifacts exist | Expected. A failed run publishes whatever completed; check `complete` and `error` in the manifest |
+| Documents missing from the manifest | They were unreadable. See `skipped_documents` in the manifest and the job warnings |
 | Source view shows no page | Not a PDF, or `EMIT_PAGE_PREVIEWS=false` |
 | `bge-m3` missing from capabilities | Image built without `INSTALL_BGE=true` |
 | OCR produces nothing | Language pack absent. Add it to the Dockerfile and set `ocr_langs` |

@@ -12,6 +12,7 @@ from corpusretrieve.pipeline.artifacts import (
     unique_identifier,
     write_json,
 )
+from corpusretrieve.pipeline.corpus import DocumentRecord
 from corpusretrieve.pipeline.previews import render_page_previews
 from docparse import ExtractionConfig, chunk_result, extract
 from docparse.enrich import describe_figures, make_anthropic_describer
@@ -90,7 +91,7 @@ class DocumentProcessor:
         self.stats = DocumentStats()
         self._used_ids: set[str] = set()
 
-    def process(self, item: InputFile, source_path: Path) -> dict[str, Any]:
+    def process(self, item: InputFile, source_path: Path) -> DocumentRecord:
         digest = hashlib.sha256(source_path.read_bytes()).hexdigest()
         doc_id = self._document_id(item, digest)
         doc_dir = self.output_dir / "documents" / doc_id
@@ -130,7 +131,14 @@ class DocumentProcessor:
         write_json(doc_dir / "extraction.json", extraction)
         write_json(doc_dir / "chunks.json", chunks)
         self.stats.documents += 1
-        return chunks
+        return DocumentRecord(
+            doc_id=doc_id,
+            source=item.filename,
+            sha256=digest,
+            chunks=len(chunks.get("chunks", [])),
+            metadata=item.metadata,
+            external_id=item.document_id,
+        )
 
     def _document_id(self, item: InputFile, digest: str) -> str:
         base = safe_identifier(

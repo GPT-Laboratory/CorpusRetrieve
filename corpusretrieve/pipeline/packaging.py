@@ -9,6 +9,7 @@ from typing import Any
 from corpusretrieve.config import VERSION
 from corpusretrieve.models import JobSpec
 from corpusretrieve.pipeline.artifacts import write_json
+from corpusretrieve.pipeline.corpus import CorpusRegistry
 
 BUNDLE_NAME = "bundle.zip"
 CATALOG_NAME = "artifact_catalog.json"
@@ -17,14 +18,18 @@ MANIFEST_NAME = "manifest.json"
 
 def package_outputs(
     spec: JobSpec,
-    documents: list[dict[str, Any]],
+    registry: CorpusRegistry,
     index_summary: dict[str, Any],
     graph_summary: dict[str, Any],
     stage_summary: dict[str, Any],
     output_dir: Path,
+    complete: bool = True,
+    error: str | None = None,
 ) -> dict[str, Any]:
     """Write the manifest, hash every artifact, and produce the ZIP bundle."""
-    manifest = _manifest(spec, documents, index_summary, graph_summary, stage_summary)
+    manifest = _manifest(
+        spec, registry, index_summary, graph_summary, stage_summary, complete, error
+    )
     write_json(output_dir / MANIFEST_NAME, manifest)
 
     catalog = _catalog(spec.job_id, output_dir)
@@ -35,10 +40,12 @@ def package_outputs(
 
 def _manifest(
     spec: JobSpec,
-    documents: list[dict[str, Any]],
+    registry: CorpusRegistry,
     index_summary: dict[str, Any],
     graph_summary: dict[str, Any],
     stage_summary: dict[str, Any],
+    complete: bool,
+    error: str | None,
 ) -> dict[str, Any]:
     return {
         "service": "CorpusRetrieve",
@@ -47,16 +54,10 @@ def _manifest(
         "corpus_name": spec.corpus_name,
         "metadata": spec.metadata,
         "submission": {"mode": spec.submission_mode, "warnings": spec.warnings},
-        "documents": [
-            {
-                "doc_id": document["doc_id"],
-                "source": document["source"],
-                "sha256": document["sha256"],
-                "chunks": len(document["chunks"]),
-                "metadata": document.get("metadata", {}),
-            }
-            for document in documents
-        ],
+        "complete": complete,
+        "error": error,
+        "documents": registry.manifest_entries(),
+        "skipped_documents": registry.failure_entries(),
         "index": index_summary,
         "knowledge_graph": graph_summary,
         "stages": stage_summary,

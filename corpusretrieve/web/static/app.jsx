@@ -131,23 +131,40 @@ function SetupPanel({ settings, onSubmit, busy, error }) {
   const [showKey, setShowKey] = useState(false);
   const [vlmModel, setVlmModel] = useState(settings.default_vlm_model || "");
   const [hot, setHot] = useState(false);
+  const [notice, setNotice] = useState("");
   const fileRef = useRef();
   const folderRef = useRef();
 
+  const fileLimit = settings.max_files_per_job || 2000;
+
   const addFiles = (list) => {
     const incoming = Array.from(list || []);
+    setNotice("");
     setFiles((previous) => {
       const keys = new Set(previous.map((f) => `${f.name}:${f.size}:${f.lastModified}`));
       const merged = [...previous];
+      let rejected = 0;
       incoming.forEach((file) => {
         const key = `${file.name}:${file.size}:${file.lastModified}`;
-        if (!keys.has(key)) { merged.push(file); keys.add(key); }
+        if (keys.has(key)) return;
+        if (merged.length >= fileLimit) { rejected += 1; return; }
+        merged.push(file);
+        keys.add(key);
       });
+      if (rejected) {
+        setNotice(
+          `This job accepts at most ${fileLimit} documents. ` +
+          `${rejected} file${rejected === 1 ? " was" : "s were"} not added.`
+        );
+      }
       return merged;
     });
   };
 
-  const removeFile = (index) => setFiles((previous) => previous.filter((_, i) => i !== index));
+  const removeFile = (index) => {
+    setNotice("");
+    setFiles((previous) => previous.filter((_, i) => i !== index));
+  };
 
   const submit = () =>
     onSubmit({
@@ -175,7 +192,7 @@ function SetupPanel({ settings, onSubmit, busy, error }) {
             <div>Everything you drop is processed as a single corpus.</div>
             <div className="formats">
               PDF &middot; DOCX &middot; XLSX &middot; CSV &middot; TSV &middot; JSON &middot; JSONL &middot; HTML &middot; TXT &middot; MD &middot; LOG &middot; images
-              <br />Up to {settings.max_files_per_job} files, {formatBytes(settings.max_bytes_per_file)} each.
+              <br />Up to {fileLimit.toLocaleString()} files, {formatBytes(settings.max_bytes_per_file)} each.
             </div>
             <div className="actions">
               <button type="button" className="btn" onClick={() => fileRef.current.click()}>Choose files</button>
@@ -186,6 +203,13 @@ function SetupPanel({ settings, onSubmit, busy, error }) {
             onChange={(e) => { addFiles(e.target.files); e.target.value = ""; }} />
           <input ref={folderRef} type="file" webkitdirectory="" directory="" multiple hidden
             onChange={(e) => { addFiles(e.target.files); e.target.value = ""; }} />
+
+          {notice && <div className="hint warn">{notice}</div>}
+          {files.length > 0 && (
+            <div className="hint">
+              {files.length.toLocaleString()} of {fileLimit.toLocaleString()} files selected
+            </div>
+          )}
 
           <div className="filelist">
             {files.map((file, index) => (

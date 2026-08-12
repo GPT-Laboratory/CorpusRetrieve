@@ -163,6 +163,27 @@ curl -N http://127.0.0.1:8000/v1/jobs/<job-id>/events
 `id` is a UUID5 of `composite_id`, so re-processing the same content yields the
 same point ID and upserts cleanly.
 
+## Partial results
+
+A job that fails partway still publishes everything it produced. The state is
+`failed` and `error` explains why, but `GET /v1/jobs/{id}/artifacts`,
+`/manifest`, `/bundle`, and the per-document endpoints all return what
+completed.
+
+The manifest distinguishes the two cases:
+
+| Field | Meaning |
+|---|---|
+| `complete` | `false` when the run ended early; the outputs are a subset |
+| `error` | The failure that ended the run, or `null` |
+| `documents` | Documents that produced output |
+| `skipped_documents` | Documents that could not be read, with the reason |
+
+An unreadable document does not end the job. It is recorded in
+`skipped_documents`, surfaced in the job's `warnings`, and counted in the
+`extract` stage's `skipped` detail. A job ends as `failed` only when no
+document at all could be processed.
+
 ## Errors
 
 `application/problem+json` with a stable `code` and a `request_id` echoed in

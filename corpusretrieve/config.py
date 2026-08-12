@@ -48,7 +48,9 @@ class Settings:
     credential_encryption_key: str = os.getenv("CREDENTIAL_ENCRYPTION_KEY", "")
 
     max_upload_bytes: int = _int("MAX_UPLOAD_BYTES", 100 * 1024 * 1024)
-    max_files_per_job: int = _int("MAX_FILES_PER_JOB", 100)
+    max_files_per_job: int = _int("MAX_FILES_PER_JOB", 2000)
+    max_form_field_bytes: int = _int("MAX_FORM_FIELD_BYTES", 32 * 1024 * 1024)
+    embedding_batch_size: int = _int("EMBEDDING_BATCH_SIZE", 256)
     max_corpus_uncompressed_bytes: int = _int(
         "MAX_CORPUS_UNCOMPRESSED_BYTES", 500 * 1024 * 1024
     )
@@ -84,6 +86,10 @@ class Settings:
             raise ValueError("DEFAULT_EMBEDDER must be 'hash' or 'bge-m3'")
         if self.max_files_per_job < 1 or self.max_upload_bytes < 1:
             raise ValueError("Upload limits must be positive")
+        if self.max_form_field_bytes < 1024:
+            raise ValueError("MAX_FORM_FIELD_BYTES must be at least 1024")
+        if self.embedding_batch_size < 1:
+            raise ValueError("EMBEDDING_BATCH_SIZE must be positive")
         if self.max_corpus_uncompressed_bytes < self.max_upload_bytes:
             raise ValueError(
                 "MAX_CORPUS_UNCOMPRESSED_BYTES must be at least MAX_UPLOAD_BYTES"

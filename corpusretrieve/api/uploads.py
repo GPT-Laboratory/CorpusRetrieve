@@ -21,6 +21,7 @@ from corpusretrieve.api.formats import (
     SUPPORTED_FORMATS_INLINE,
     available_embedders,
 )
+from corpusretrieve.api.multipart import LargeUploadRoute
 from corpusretrieve.api.schemas import JobAccepted, ProblemDetail
 from corpusretrieve.config import get_settings
 from corpusretrieve.models import InputFile, JobSpec, JobState
@@ -29,7 +30,7 @@ from corpusretrieve.security import get_credential_store
 from corpusretrieve.state import get_job_store
 from corpusretrieve.storage import get_artifact_store
 
-router = APIRouter(prefix="/v1")
+router = APIRouter(prefix="/v1", route_class=LargeUploadRoute)
 
 MAX_CORPUS_NAME_LENGTH = 200
 ARCHIVE_ENTRY_MULTIPLIER = 10

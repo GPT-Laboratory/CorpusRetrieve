@@ -41,11 +41,24 @@ and small corpora; use `rq` when uploads are large or concurrent.
 | Variable | Default | Notes |
 |---|---|---|
 | `MAX_UPLOAD_BYTES` | `104857600` | Per file, and for a submitted ZIP |
-| `MAX_FILES_PER_JOB` | `100` | Documents per corpus |
+| `MAX_FILES_PER_JOB` | `2000` | Documents per corpus |
 | `MAX_CORPUS_UNCOMPRESSED_BYTES` | `524288000` | Total expanded ZIP size |
+| `MAX_FORM_FIELD_BYTES` | `33554432` | Ceiling for `metadata` and `document_config` |
+| `EMBEDDING_BATCH_SIZE` | `256` | Chunks embedded per batch; bounds peak memory |
 
 `MAX_CORPUS_UNCOMPRESSED_BYTES` must be at least `MAX_UPLOAD_BYTES`. Archive
 inspection also refuses more than ten times `MAX_FILES_PER_JOB` entries.
+
+Two of these raise framework defaults rather than adding a new restriction.
+Starlette caps a multipart request at 1000 parts and each individual part at
+1 MB. The first rejects large corpora before any application validation runs;
+the second rejects a `document_config` describing more than roughly 800
+documents. Both ceilings are lifted to the configured values.
+
+`EMBEDDING_BATCH_SIZE` is the main lever on worker memory. Chunks are read from
+disk, embedded a batch at a time, and written straight to `vectors.jsonl`, so
+lowering it reduces peak usage on a constrained worker at a small cost in
+throughput.
 
 ## Embedding
 
