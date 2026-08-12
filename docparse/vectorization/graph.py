@@ -28,6 +28,19 @@ _CHUNK_NODE_TYPE = {
 }
 
 
+# XML 1.0 permits tab, newline, carriage return, and the character ranges
+# below.  Extractors can legitimately surface other control characters (most
+# commonly NUL from PDFs and office documents), which lxml refuses to write.
+_XML_INVALID_CHARS = re.compile(
+    "[\x00-\x08\x0b\x0c\x0e-\x1f\ud800-\udfff\ufffe\uffff]"
+)
+
+
+def _xml_safe_text(value: Any) -> str:
+    """Return a scalar string that can always be serialized as XML 1.0."""
+    return _XML_INVALID_CHARS.sub("\ufffd", "" if value is None else str(value))
+
+
 class KnowledgeGraph:
     def __init__(self) -> None:
         self.g = nx.MultiDiGraph()
@@ -202,9 +215,17 @@ class KnowledgeGraph:
         gml = out / "knowledge_graph.graphml"
         g2 = nx.MultiDiGraph()
         for n, d in self.g.nodes(data=True):        # graphml needs scalar attrs
-            g2.add_node(n, **{k: ("" if v is None else str(v)) for k, v in d.items()})
+            g2.add_node(
+                _xml_safe_text(n),
+                **{k: _xml_safe_text(v) for k, v in d.items()},
+            )
         for a, b, k, d in self.g.edges(keys=True, data=True):
-            g2.add_edge(a, b, key=k, **{kk: str(vv) for kk, vv in d.items()})
+            g2.add_edge(
+                _xml_safe_text(a),
+                _xml_safe_text(b),
+                key=_xml_safe_text(k),
+                **{kk: _xml_safe_text(vv) for kk, vv in d.items()},
+            )
         nx.write_graphml(g2, gml)
 
         js = out / "knowledge_graph.json"
