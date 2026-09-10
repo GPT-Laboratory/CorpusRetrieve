@@ -5,6 +5,7 @@ services:
       args:
         VERSION: 1.0.0
         INSTALL_BGE: ${INSTALL_BGE:-false}
+    image: corpusretrieve:latest
     env_file: .env
     command: python -m uvicorn service.app:app --host 0.0.0.0 --port 8000
     ports:
@@ -15,17 +16,16 @@ services:
     restart: unless-stopped
 
   worker:
-    build:
-      context: .
-      args:
-        VERSION: 1.0.0
-        INSTALL_BGE: ${INSTALL_BGE:-false}
+    # reusing image from api
+    image: corpusretrieve:latest
     env_file: .env
     command: rq worker corpusretrieve --url ${REDIS_URL:-redis://redis:6379/0}
     depends_on:
       - redis
       - minio
     restart: unless-stopped
+    healthcheck:
+      disable: true
 
   redis:
     image: redis:7.4.10-alpine
