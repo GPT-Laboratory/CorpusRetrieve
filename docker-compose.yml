@@ -8,7 +8,7 @@ services:
     env_file: .env
     command: python -m uvicorn service.app:app --host 0.0.0.0 --port 8000
     ports:
-      - "8000:8000"
+      - "${APP_API_PORT:-8000}:8000"
     depends_on:
       - redis
       - minio
