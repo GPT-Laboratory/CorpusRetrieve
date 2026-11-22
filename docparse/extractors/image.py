@@ -22,7 +22,7 @@ class ImageExtractor:
             from docparse.extractors.pdf import _ocr_lines
             buf = io.BytesIO()
             img.save(buf, format="PNG")
-            lines = _ocr_lines(buf.getvalue(), cfg, result, scale=1.0)  # bbox in pixels
+            lines = _ocr_lines(buf.getvalue(), cfg, result, scale=1.0) or []  # bbox in pixels
             order = 1
             if cfg.ocr_line_elements:
                 for text, conf, bbox in lines:

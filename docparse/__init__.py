@@ -18,7 +18,7 @@ from docparse.models import Element, ExtractionConfig, ExtractionResult
 from docparse.pipeline import extract, extract_path, extract_zip
 from docparse.router import get_extractor, register, register_fn, registered_types
 
-__version__ = "1.0.0"
+__version__ = "2.0.0"
 __all__ = [
     "extract", "extract_path", "extract_zip",
     "chunk_result", "Chunk", "ChunkingConfig", "ChunkingResult",

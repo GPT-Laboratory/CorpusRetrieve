@@ -18,3 +18,16 @@ COLLECTION_OF = {
 
 def point_uuid(composite: str) -> str:
     return str(uuid.uuid5(uuid.NAMESPACE_URL, composite))
+
+
+POINT_ID_SCHEME = "v2"
+
+
+def point_composite(doc_id: str, chunk_type: str, chunk_id: str, embed_model: str,
+                    embed_version: str) -> str:
+    """The single definition of a vector point's identity (index and graph share it).
+
+    The corpus name is not part of it, so renaming a corpus keeps every point ID.
+    The corpus is recorded in the payload instead.
+    """
+    return f"{doc_id}:{chunk_type}:{chunk_id}:{embed_model}:{embed_version}"

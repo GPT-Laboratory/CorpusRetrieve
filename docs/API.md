@@ -25,7 +25,9 @@ DELETE /v1/jobs/{job_id}      -> remove everything stored for the job
 | `corpus_name` | string, 1–200 characters | no | `corpus` |
 | `metadata` | JSON object encoded as text | no | `{}` |
 | `document_config` | JSON object keyed by filename or archive path | no | `{}` |
-| `embedder` | `hash` or `bge-m3` | no | `DEFAULT_EMBEDDER` |
+| `embedder` | supported embedding backend | no | `DEFAULT_EMBEDDER` |
+| `require_bibliographic` | boolean | no | `REQUIRE_BIBLIOGRAPHIC` |
+| `allow_degraded` | boolean | no | `false` |
 | `enable_vlm` | boolean | no | `false` |
 | `vlm_model` | Anthropic model ID | no | `DEFAULT_VLM_MODEL` |
 
@@ -100,9 +102,19 @@ Follow `links` rather than constructing URLs.
     }
   ],
   "outputs_ready": true,
+  "artifacts_available": true,
+  "release_ready": true,
+  "quality_reasons": [],
+  "corpus_name": "corpus",
   "links": {}
 }
 ```
+
+`artifacts_available` is true whenever outputs were published, including for a
+job that failed its quality gate (`release_ready: false`, with the gate's
+reasons in `quality_reasons`) or failed partway. Extract, enrich and chunk run
+per document in one loop; each reports its own processing time in
+`elapsed_ms`, and `detail.loop_wall_ms` gives the loop's wall-clock time.
 
 `stages` always contains six entries in pipeline order, even before processing
 starts. Stage detail keys vary by stage and are additive across releases; treat
@@ -197,8 +209,13 @@ document at all could be processed.
 | 410 | `artifact-expired` |
 | 413 | `file-too-large`, `too-many-files`, `archive-uncompressed-limit`, `archive-entry-limit` |
 | 415 | `unsupported-file-type`, `zip-required` |
-| 422 | `validation-error`, `invalid-corpus-name`, `vlm-api-key-required`, `embedder-unavailable`, `zip-must-be-uploaded-alone`, `empty-file` |
+| 422 | `validation-error`, `invalid-corpus-name`, `vlm-api-key-required`, `embedder-unavailable`, `zip-must-be-uploaded-alone`, `empty-file`, `intake-check-failed` |
 | 503 | `artifact-storage-unavailable`, `job-queue-unavailable` |
+
+`intake-check-failed` lists each problem in `errors` as `{check, count,
+examples}` (`filename_collisions`, `unmatched_config_keys`,
+`files_without_document_config`). Nothing was stored; fix the configuration or
+resubmit with `allow_degraded=true`.
 
 A `409` means the output is not ready yet, so poll. A `410` means retention
 expired and the job must be resubmitted.
@@ -223,14 +240,28 @@ surface; its shapes may change between releases.
 | Endpoint | Purpose |
 |---|---|
 | `GET /console/settings` | Bootstrap values, including whether a service key exists |
+| `GET /console/jobs` | Recent jobs, newest first |
 | `GET /console/jobs/{id}` | Job status for the interface |
 | `GET /console/jobs/{id}/events` | Progress stream for the interface |
 | `GET /console/jobs/{id}/documents` | Corpus overview and document list |
 | `GET /console/jobs/{id}/documents/{doc}/elements` | Elements with page geometry; `page` and `kind` filters |
 | `GET /console/jobs/{id}/documents/{doc}/chunks` | Chunks trimmed for rendering |
-| `GET /console/jobs/{id}/graph` | Graph shaped for exploration; `hide` filter |
-| `GET /console/jobs/{id}/projection` | 2D projection of the vectors |
-| `GET /console/jobs/{id}/artifacts` | Artifacts grouped by output family |
+| `GET /console/jobs/{id}/graph` | One document's graph with layout positions; `doc_id` (default: first document) |
+| `GET /console/jobs/{id}/projection` | 2D projection of an even sample of the vectors |
+| `GET /console/jobs/{id}/artifacts` | Corpus-level artifacts, per-family counts and sizes, bundle link |
 
 `GET /console/settings` returns only a boolean for the Anthropic key. The key
 value is never sent to the browser.
+
+## Versioning and strict metadata
+
+Application release is **2.0.0**, artifact schemas are **2.0.0**, and the HTTP
+resource prefix is still **`/v1`**. These version numbers serve different
+purposes and are intentionally not all renamed.
+
+For the exact bibliographic configuration example, archive member path rules
+and `origin: extracted` fallback see [Document configuration](DOCUMENT_CONFIG.md).
+
+`require_bibliographic=true` checks that a publication record is resolved for
+each indexed unit. It is not a guarantee of correct metadata or citation
+quality. Inspect `manifest.quality` and `release_ready` after the job.

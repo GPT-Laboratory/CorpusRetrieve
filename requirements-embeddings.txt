@@ -1,1 +1,2 @@
-
+FlagEmbedding>=1.2,<2
+sentence-transformers>=3,<6

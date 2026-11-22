@@ -44,7 +44,8 @@ def test_every_documented_route_is_registered(client):
 
 def test_openapi_document_is_valid(client):
     schema = client.get("/openapi.json").json()
-    assert schema["info"]["version"] == "1.0.0"
+    from corpusretrieve.config import VERSION
+    assert schema["info"]["version"] == VERSION
     assert "ProblemDetail" in schema["components"]["schemas"]
     upload = schema["paths"]["/v1/jobs"]["post"]
     assert upload["responses"]["415"]["content"] == {

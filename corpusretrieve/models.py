@@ -28,14 +28,22 @@ class JobSpec:
     vlm_model: str = "claude-sonnet-4-6"
     submission_mode: str = "corpus"
     warnings: list[str] = field(default_factory=list)
+    # per-job override of DEGRADED_POLICY=fail (never weakens policy=warn)
+    allow_degraded: bool = False
+    require_bibliographic: bool = False
+    # what intake found (filename collisions, unmatched document_config keys)
+    intake: dict[str, Any] = field(default_factory=dict)
+    # collection-level provenance from document_config["__collection__"]
+    collection: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
     @classmethod
     def from_dict(cls, value: dict[str, Any]) -> JobSpec:
+        known = set(cls.__dataclass_fields__)
         return cls(
-            **{k: v for k, v in value.items() if k != "files"},
+            **{k: v for k, v in value.items() if k != "files" and k in known},
             files=[InputFile(**item) for item in value["files"]],
         )
 
@@ -69,6 +77,10 @@ class JobState:
         ]
     )
     warnings: list[str] = field(default_factory=list)
+    # release decision copied from the manifest, so a client can show why a
+    # finished job is not release-ready without downloading the manifest
+    quality: dict[str, Any] = field(default_factory=dict)
+    corpus_name: str | None = None
     created_at: float = field(default_factory=time)
     updated_at: float = field(default_factory=time)
 
@@ -77,4 +89,5 @@ class JobState:
 
     @classmethod
     def from_dict(cls, value: dict[str, Any]) -> JobState:
-        return cls(**value)
+        known = set(cls.__dataclass_fields__)
+        return cls(**{k: v for k, v in value.items() if k in known})

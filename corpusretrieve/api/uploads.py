@@ -20,10 +20,14 @@ from corpusretrieve.api.formats import (
     SUPPORTED_EXTENSIONS,
     SUPPORTED_FORMATS_INLINE,
     available_embedders,
+    embedder_available,
+    ocr_preflight,
 )
 from corpusretrieve.api.multipart import LargeUploadRoute
 from corpusretrieve.api.schemas import JobAccepted, ProblemDetail
 from corpusretrieve.config import get_settings
+from corpusretrieve.intake import COLLECTION_KEY, gate_failures, intake_report
+from corpusretrieve.intake import intake_warnings as _intake_warnings
 from corpusretrieve.models import InputFile, JobSpec, JobState
 from corpusretrieve.queueing import enqueue_job
 from corpusretrieve.security import get_credential_store
@@ -170,7 +174,7 @@ def _validate_submission(
         )
 
     selected = embedder or settings.default_embedder
-    if selected not in available_embedders():
+    if not embedder_available(selected):
         raise APIError(
             422,
             "embedder-unavailable",
@@ -180,7 +184,8 @@ def _validate_submission(
 
 
 def _store_uploads(
-    job_id: str, uploads: list[UploadFile], document_config: dict
+    job_id: str, uploads: list[UploadFile], document_config: dict,
+    used_keys: set[str] | None = None, unconfigured: list[str] | None = None,
 ) -> list[InputFile]:
     settings = get_settings()
     store = get_artifact_store()
@@ -207,6 +212,11 @@ def _store_uploads(
             )
 
         key = _config_key(filename, seen)
+        if used_keys is not None:
+            if key in document_config:
+                used_keys.add(key)
+            elif unconfigured is not None:
+                unconfigured.append(key)
         document_id, metadata = _document_entry(document_config, key, key)
         storage_key = f"jobs/{job_id}/inputs/{index:04d}-{filename}"
         store.put_fileobj(storage_key, upload.file, upload.content_type)
@@ -236,17 +246,32 @@ def _submit(
     vlm_model: str | None,
     request_api_key: str | None,
     warnings: list[str] | None = None,
+    allow_degraded: bool = False,
+    config_keys: set[str] | None = None,
+    pre_used_keys: set[str] | None = None,
+    pre_unconfigured: list[str] | None = None,
+    collection: dict | None = None,
+    require_bibliographic: bool = False,
 ) -> JSONResponse:
     settings = get_settings()
-    warnings = warnings or []
+    warnings = list(warnings or [])
+    if (require_bibliographic or settings.require_bibliographic) and not document_config:
+        warnings.append("Strict publication provenance requested without per-document "
+                        "configuration: only PDFs with extractable DOI metadata can "
+                        "receive an automatic publication record.")
     name, selected_embedder, api_key = _validate_submission(
         uploads, corpus_name, embedder, enable_vlm, request_api_key
     )
+    ocr = ocr_preflight(settings.ocr_langs)
+    if not ocr["ready"]:
+        warnings.append(ocr["message"])
 
     job_id = uuid.uuid4().hex[:24]
     store = get_artifact_store()
+    used_keys: set[str] = set(pre_used_keys or ())
+    unconfigured: list[str] = []
     try:
-        inputs = _store_uploads(job_id, uploads, document_config)
+        inputs = _store_uploads(job_id, uploads, document_config, used_keys, unconfigured)
     except APIError:
         store.delete_prefix(f"jobs/{job_id}/")
         raise
@@ -258,10 +283,36 @@ def _submit(
             "The uploaded files could not be written to artifact storage.",
         ) from exc
 
+    # archive configs are normalised to per-file keys already; the user's
+    # original keys (paths) are checked inside expand_archive
+    keys_to_check = config_keys if config_keys is not None else set(document_config)
+    if pre_unconfigured is not None:
+        unconfigured = list(pre_unconfigured)
+    intake = intake_report([i.filename for i in inputs], keys_to_check, used_keys,
+                           unconfigured if keys_to_check else [])
+    warnings += _intake_warnings(intake)
+    blocking = gate_failures(intake)
+    if blocking and settings.degraded_policy == "fail" and not allow_degraded:
+        # these findings fail the quality gate whatever the build produces, so
+        # report them now instead of after hours of processing
+        store.delete_prefix(f"jobs/{job_id}/")
+        summary = "; ".join(f"{item['check']}={item['count']}" for item in blocking)
+        raise APIError(
+            422,
+            "intake-check-failed",
+            f"The submission would fail the quality gate ({summary}). Fix the "
+            "document_config keys or file names, or resubmit with "
+            "allow_degraded=true to build it anyway.",
+            errors=blocking,
+        )
     spec = JobSpec(
         job_id=job_id,
         corpus_name=name,
         files=inputs,
+        allow_degraded=allow_degraded,
+        require_bibliographic=require_bibliographic or settings.require_bibliographic,
+        intake=intake,
+        collection=collection or {},
         metadata=metadata,
         embedder=selected_embedder,
         enable_vlm=enable_vlm,
@@ -269,7 +320,8 @@ def _submit(
         submission_mode=submission_mode,
         warnings=warnings,
     )
-    state = JobState(job_id=job_id, message="Job accepted", warnings=warnings)
+    state = JobState(job_id=job_id, message="Job accepted", warnings=warnings,
+                     corpus_name=name)
 
     jobs = get_job_store()
     credentials = get_credential_store()
@@ -339,8 +391,10 @@ async def upload_files(
         ),
     ] = "{}",
     embedder: Annotated[
-        Literal["hash", "bge-m3"] | None,
-        Form(description="hash is always available; bge-m3 requires the optional model."),
+        str | None,
+        Form(max_length=300, description=(
+            "hash, hash-v2, bge-m3, auto, or st:<sentence-transformers model id>; "
+            "GET /v1/capabilities lists what is installed.")),
     ] = None,
     enable_vlm: Annotated[
         bool, Form(description="Use Anthropic VLM enrichment for extracted figures.")
@@ -355,9 +409,22 @@ async def upload_files(
             description="Optional per-request override. Never persisted in artifacts.",
         ),
     ] = None,
+    allow_degraded: Annotated[
+        bool,
+        Form(description="Accept a degraded build (missing OCR, failed figure "
+                         "descriptions, collisions) as completed instead of failed."),
+    ] = False,
+    require_bibliographic: Annotated[
+        bool, Form(description="Require each indexed unit to resolve to publication "
+                         "metadata. Overrides REQUIRE_BIBLIOGRAPHIC=false."),
+    ] = False,
 ):
     parsed_metadata = _json_object(metadata, "metadata")
     parsed_config = _json_object(document_config, "document_config")
+    collection = parsed_config.pop(COLLECTION_KEY, None) or {}
+    if not isinstance(collection, dict):
+        raise APIError(400, "invalid-document-config",
+                       f"{COLLECTION_KEY} must be a JSON object.")
     archives = [
         upload
         for upload in files
@@ -372,6 +439,8 @@ async def upload_files(
                 "Upload exactly one ZIP without additional files.",
             )
         uploads, normalized_config, warnings = expand_archive(archives[0], parsed_config)
+        archive_used = normalized_config.pop("__used_user_keys__", set())
+        archive_unconfigured = normalized_config.pop("__unconfigured__", [])
         try:
             return _submit(
                 background_tasks,
@@ -386,6 +455,12 @@ async def upload_files(
                 vlm_model,
                 anthropic_api_key,
                 warnings,
+                allow_degraded=allow_degraded,
+                config_keys=set(parsed_config),
+                pre_used_keys=archive_used,
+                pre_unconfigured=archive_unconfigured,
+                collection=collection,
+                require_bibliographic=require_bibliographic,
             )
         finally:
             for upload in uploads:
@@ -403,6 +478,9 @@ async def upload_files(
         enable_vlm,
         vlm_model,
         anthropic_api_key,
+        allow_degraded=allow_degraded,
+        collection=collection,
+        require_bibliographic=require_bibliographic,
     )
 
 
@@ -441,6 +519,8 @@ def expand_archive(
     normalized_config: dict = {}
     skipped: list[str] = []
     seen: dict[str, int] = {}
+    used_user_keys: set[str] = set()
+    unconfigured_members: list[str] = []
     total_uncompressed = 0
 
     try:
@@ -484,6 +564,12 @@ def expand_archive(
                     )
 
                 key = _config_key(filename, seen)
+                if raw_path in user_config:
+                    used_user_keys.add(raw_path)
+                elif key in user_config:
+                    used_user_keys.add(key)
+                elif user_config:
+                    unconfigured_members.append(raw_path)
                 supplied = user_config.get(raw_path, user_config.get(key, {}))
                 if not isinstance(supplied, dict):
                     raise APIError(
@@ -541,6 +627,9 @@ def expand_archive(
             f"{SUPPORTED_FORMATS_INLINE}.",
         )
 
+    # which of the user's keys matched an entry: reported by _submit
+    normalized_config["__used_user_keys__"] = used_user_keys
+    normalized_config["__unconfigured__"] = unconfigured_members
     warnings = []
     if skipped:
         preview = ", ".join(skipped[:10])

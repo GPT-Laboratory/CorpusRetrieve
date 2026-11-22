@@ -10,7 +10,7 @@ from dotenv import find_dotenv, load_dotenv
 
 load_dotenv(find_dotenv(usecwd=True))
 
-VERSION = "1.0.0"
+VERSION = "2.0.0"
 
 
 def _bool(name: str, default: bool) -> bool:
@@ -31,8 +31,12 @@ class Settings:
 
     app_name: str = os.getenv("APP_NAME", "CorpusRetrieve")
     version: str = VERSION
+    deployment_mode: str = os.getenv("DEPLOYMENT_MODE", "development")
 
+    # memory: development and tests (lost on restart, held in RAM).
+    # local: one machine, persisted under LOCAL_DATA_DIR. s3: production.
     storage_backend: str = os.getenv("STORAGE_BACKEND", "memory")
+    local_data_dir: str = os.getenv("LOCAL_DATA_DIR", "corpusretrieve-data")
     s3_endpoint_url: str = os.getenv("S3_ENDPOINT_URL", "http://localhost:9000")
     s3_access_key: str = os.getenv("S3_ACCESS_KEY", "corpusretrieve")
     s3_secret_key: str = os.getenv("S3_SECRET_KEY", "change-this-secret")
@@ -55,6 +59,8 @@ class Settings:
         "MAX_CORPUS_UNCOMPRESSED_BYTES", 500 * 1024 * 1024
     )
 
+    # "hash" (hashing-v1) stays the default so existing consumers keep working;
+    # docs/EMBEDDINGS.md compares hash-v2 and the semantic models
     default_embedder: str = os.getenv("DEFAULT_EMBEDDER", "hash")
     default_vlm_model: str = os.getenv("DEFAULT_VLM_MODEL", "claude-sonnet-4-6")
     anthropic_api_key: str = field(
@@ -69,21 +75,69 @@ class Settings:
     console_max_projection_points: int = _int("CONSOLE_MAX_PROJECTION_POINTS", 5000)
 
     delete_inputs_after_processing: bool = _bool("DELETE_INPUTS_AFTER_PROCESSING", True)
+    # no cross-origin callers unless configured; the bundled web interface is
+    # same-origin and is unaffected
     cors_origins: tuple[str, ...] = tuple(
-        x.strip() for x in os.getenv("CORS_ORIGINS", "*").split(",") if x.strip()
+        x.strip() for x in os.getenv("CORS_ORIGINS", "").split(",") if x.strip()
     )
+    # comma-separated keys accepted as "Authorization: Bearer <key>" or
+    # "X-API-Key: <key>". Empty means the API is open (development only).
+    api_keys: tuple[str, ...] = tuple(
+        x.strip() for x in os.getenv("API_KEYS", "").split(",") if x.strip()
+    )
+
+    # ---- build-quality and language settings ------------------------------
+    # every listed Tesseract language must be installed, or OCR pages count
+    # as degraded. TESSERACT_CMD points at the binary when it is not on PATH
+    # (the usual case on Windows).
+    ocr_langs: str = os.getenv("OCR_LANGS", "eng")
+    tesseract_cmd: str = os.getenv("TESSERACT_CMD", "")
+    # fail: a degraded build is published but the job is marked failed and the
+    # manifest says release_ready=false. warn: the job completes with warnings.
+    degraded_policy: str = os.getenv("DEGRADED_POLICY", "fail")
+    # When enabled, a build requires every indexed unit to resolve to a
+    # publication record (manifest metadata or explicitly labelled PDF fallback).
+    require_bibliographic: bool = _bool("REQUIRE_BIBLIOGRAPHIC", False)
+    max_vlm_calls: int = _int("MAX_VLM_CALLS", 0)          # 0 = unlimited
+    vlm_max_retries: int = _int("VLM_MAX_RETRIES", 3)
+    vlm_timeout_seconds: int = _int("VLM_TIMEOUT_SECONDS", 120)
+    # figure descriptions stop for the rest of the job after this many
+    # consecutive failures, or at once on an authentication, permission or
+    # billing error; the remaining figures are counted, not attempted
+    vlm_max_consecutive_failures: int = _int("VLM_MAX_CONSECUTIVE_FAILURES", 25)
+    # keep dense vectors inside vectors.jsonl as well as dense.npy; turn off to
+    # roughly halve the index size when every consumer reads dense.npy
+    index_inline_vectors: bool = _bool("INDEX_INLINE_VECTORS", True)
 
     @property
     def static_dir(self) -> Path:
         return Path(__file__).resolve().parent / "web" / "static"
 
     def validate(self) -> None:
-        if self.storage_backend not in {"memory", "s3"}:
-            raise ValueError("STORAGE_BACKEND must be 'memory' or 's3'")
+        if self.deployment_mode not in {"development", "production"}:
+            raise ValueError("DEPLOYMENT_MODE must be 'development' or 'production'")
+        if self.deployment_mode == "production":
+            if self.storage_backend != "s3" or self.job_mode != "rq":
+                raise ValueError("production requires STORAGE_BACKEND=s3 and JOB_MODE=rq")
+            if not self.api_keys:
+                raise ValueError("production requires API_KEYS")
+            if "*" in self.cors_origins:
+                raise ValueError("production may not use wildcard CORS_ORIGINS")
+            if self.s3_secret_key in {"", "change-this-secret", "replace-with-a-long-random-secret"}:
+                raise ValueError("production requires a non-default S3_SECRET_KEY")
+        if self.storage_backend not in {"memory", "local", "s3"}:
+            raise ValueError("STORAGE_BACKEND must be 'memory', 'local' or 's3'")
         if self.job_mode not in {"inline", "rq"}:
             raise ValueError("JOB_MODE must be 'inline' or 'rq'")
-        if self.default_embedder not in {"hash", "bge-m3"}:
-            raise ValueError("DEFAULT_EMBEDDER must be 'hash' or 'bge-m3'")
+        if not valid_embedder_spec(self.default_embedder):
+            raise ValueError("DEFAULT_EMBEDDER must be 'hash', 'hash-v2', 'bge-m3', "
+                             "'auto' or 'st:<sentence-transformers model id>'")
+        if (self.max_vlm_calls < 0 or self.vlm_max_retries < 0
+                or self.vlm_timeout_seconds < 1 or self.vlm_max_consecutive_failures < 1):
+            raise ValueError("VLM limits must be positive (MAX_VLM_CALLS and "
+                             "VLM_MAX_RETRIES may be 0)")
+        if self.degraded_policy not in {"fail", "warn"}:
+            raise ValueError("DEGRADED_POLICY must be 'fail' or 'warn'")
         if self.max_files_per_job < 1 or self.max_upload_bytes < 1:
             raise ValueError("Upload limits must be positive")
         if self.max_form_field_bytes < 1024:
@@ -105,6 +159,14 @@ class Settings:
                 raise ValueError(
                     "CREDENTIAL_ENCRYPTION_KEY must be a valid Fernet key"
                 ) from exc
+
+
+EMBEDDER_KEYWORDS = frozenset({"hash", "hash-v2", "bge-m3", "auto"})
+
+
+def valid_embedder_spec(spec: str) -> bool:
+    """A keyword, or ``st:`` followed by a sentence-transformers model id."""
+    return spec in EMBEDDER_KEYWORDS or (spec.startswith("st:") and len(spec) > 3)
 
 
 @lru_cache

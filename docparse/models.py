@@ -12,6 +12,7 @@ Complex elements (tables, figures) carry up to three linked views:
 """
 from __future__ import annotations
 
+import hashlib
 import uuid
 from dataclasses import asdict, dataclass, field
 from typing import Any, Literal
@@ -35,7 +36,15 @@ ElementKind = Literal[
 
 
 def _new_id() -> str:
+    # Provisional handle only. docparse.postprocess.finalize replaces every
+    # element ID with a deterministic, content-derived one (see element_id).
     return uuid.uuid4().hex[:12]
+
+
+def element_id(source_sha256: str, position: int, kind: str, page: int | None) -> str:
+    """Deterministic element identifier: same bytes in, same IDs out."""
+    key = f"{source_sha256}:{position}:{kind}:{page if page is not None else '-'}"
+    return hashlib.sha256(key.encode("utf-8")).hexdigest()[:16]
 
 
 @dataclass
@@ -159,13 +168,22 @@ class ExtractionConfig:
         r"provided by .{0,40}repository", r"^\s*\d{7,},?\s*(19|20)\d{2}",
         r"open access article under the terms", r"©\s*(19|20)\d{2}\s*the author",
         r"^\s*\d+\s+of\s+\d+\s*$",                        # "1 of 17" page footer
-        r"https?://doi\.org/\S+",
         r"^\s*(?:international\s+)?journal of [a-z]+[a-z ]{0,40}$",  # journal footer line
     )
 
     # unruled tables: caption-anchored text-strategy detection when ruled detection finds none
     table_fallback: str = "text"             # "text" | "none"
-    table_caption_regex: str = r"^\s*tab(?:le|ell|ulukko)\s*\d"
+    # "tab(?:le|ell|ulukko)" could never match Finnish "taulukko".
+    table_caption_regex: str = r"^\s*(?:table|tabell|taulukko|tab\.)\s*\d"
+
+    max_claims_per_document: int = 400       # was a fixed 40
+
+    # pages whose text layer is mostly undecodable are re-read with OCR
+    garbled_text_threshold: float = 0.3
+
+    # images repeated on this share of pages (logos, banners) are not figures
+    repeated_image_min_ratio: float = 0.3
+    repeated_image_min_pages: int = 3
 
     # scientific-document enrichment (dehyphenation, license-noise removal, equations,
     # roles, paper metadata, citation graph, quantities/claims) — see docparse.scientific
@@ -177,7 +195,7 @@ class ExtractionConfig:
 
     # OCR (scanned pages / image files)
     ocr: Literal["auto", "on", "off"] = "auto"   # auto = only pages with < ocr_min_chars of text
-    ocr_langs: str = "eng"                        # e.g. "eng+fin+swe" once traineddata is present
+    ocr_langs: str = "eng"                       # every listed traineddata must be installed
     ocr_min_chars: int = 20
     ocr_preprocess: bool = True              # grayscale + autocontrast before Tesseract
     ocr_auto_orient: bool = True             # use Tesseract OSD to fix rotated scans
@@ -189,7 +207,7 @@ class ExtractionConfig:
 
     # language
     detect_language: bool = True
-    per_element_language: bool = False       # detect language per element (code-switched docs)
+    per_element_language: bool = True        # detect language per element (code-switched docs)
 
     # limits / heuristics
     max_pages: int | None = None
@@ -197,7 +215,8 @@ class ExtractionConfig:
     table_max_rows: int = 200                # cap rows serialized to markdown (docx/xlsx/csv)
 
     # caption detection (FI/EN/SV), extend freely
-    caption_regex: str = r"^(fig(?:ure)?\.?|kuva|kuvio|taulukko|table|tabell|liite|appendix)\b"
+    caption_regex: str = (r"^(fig(?:ure)?\.?|figur|kuva|kuvio|taulukko|table|tabell|liite|bilaga|"
+                          r"appendix)\b")
 
     # list detection (bullets / numbered)
     list_regex: str = r"^\s*(?:[-*•‣▪]|\(?\d{1,3}[.)]|\(?[a-z][.)])\s+"

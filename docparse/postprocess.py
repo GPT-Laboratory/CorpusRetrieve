@@ -13,7 +13,7 @@ from __future__ import annotations
 import re
 
 from docparse.lang import detect_language
-from docparse.models import ExtractionConfig, ExtractionResult
+from docparse.models import ExtractionConfig, ExtractionResult, element_id
 
 _TEXT_KINDS = {"title", "heading", "narrative", "list_item", "caption", "reference"}
 
@@ -94,7 +94,33 @@ def _assign_languages(result: ExtractionResult, cfg: ExtractionConfig) -> None:
             el.language = result.language
 
 
+_ID_REFERENCE_KEYS = ("context_before", "context_after")
+
+
+def _assign_deterministic_ids(result: ExtractionResult) -> None:
+    """Replace provisional uuid4 handles with content-derived IDs.
+
+    The seed is the SHA-256 of the source bytes (set by docparse.pipeline), so
+    two builds of the same file yield identical element IDs. Every reference
+    created before this point (caption -> figure/table, formula context) is
+    remapped so links survive the renaming.
+    """
+    seed = result.stats.get("source_sha256") or result.source or "unknown"
+    mapping: dict[str, str] = {}
+    for position, el in enumerate(result.elements):
+        new = element_id(seed, position, el.kind, el.page)
+        mapping[el.id] = new
+        el.id = new
+    for el in result.elements:
+        if el.parent_id in mapping:
+            el.parent_id = mapping[el.parent_id]
+        for key in _ID_REFERENCE_KEYS:
+            if el.metadata.get(key) in mapping:
+                el.metadata[key] = mapping[el.metadata[key]]
+
+
 def finalize(result: ExtractionResult, cfg: ExtractionConfig) -> ExtractionResult:
+    _assign_deterministic_ids(result)
     _promote_list_items(result, cfg)
     _assign_section_paths(result)
     _assign_char_offsets(result)

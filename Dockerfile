@@ -1,6 +1,6 @@
 FROM python:3.12-slim AS runtime
 
-ARG VERSION=1.0.0
+ARG VERSION=2.0.0
 ARG INSTALL_BGE=false
 
 LABEL org.opencontainers.image.title="CorpusRetrieve" \
@@ -9,6 +9,8 @@ LABEL org.opencontainers.image.title="CorpusRetrieve" \
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
+    PYTHONHASHSEED=0 \
+    OCR_LANGS=eng \
     PIP_NO_CACHE_DIR=1
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -29,6 +31,9 @@ COPY corpusretrieve ./corpusretrieve
 COPY docparse ./docparse
 COPY service ./service
 COPY VERSION pyproject.toml README.md ./
+
+# Install the distribution so `corpusretrieve build/verify/repair` works in the image.
+RUN pip install --no-deps .
 
 RUN useradd --create-home --uid 10001 corpusretrieve
 USER corpusretrieve

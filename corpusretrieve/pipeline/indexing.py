@@ -5,17 +5,29 @@ from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
+import numpy as np
+
 from corpusretrieve.models import JobSpec
 from corpusretrieve.pipeline.artifacts import write_json
 from corpusretrieve.pipeline.corpus import CorpusRegistry, write_corpus_chunks
-from docparse.vectorization.canonical import normalize_chunk, payload_for
+from docparse.vectorization.canonical import (
+    PAYLOAD_SCHEMA_VERSION,
+    normalize_chunk,
+    payload_for,
+)
 from docparse.vectorization.embedding import BM25SparseEncoder, resolve_embedder
-from docparse.vectorization.ids import COLLECTION_OF, point_uuid
+from docparse.vectorization.ids import (
+    COLLECTION_OF,
+    POINT_ID_SCHEME,
+    point_composite,
+    point_uuid,
+)
 
 INDEX_FORMAT = "corpusretrieve-portable-index"
-INDEX_SCHEMA_VERSION = "1.0.0"
+INDEX_SCHEMA_VERSION = "2.0.0"
 EMBEDDING_VERSION = "v1"
 DEFAULT_BATCH_SIZE = 256
+DENSE_FILE = "dense.npy"
 
 
 def build_index(
@@ -24,6 +36,7 @@ def build_index(
     spec: JobSpec,
     batch_size: int = DEFAULT_BATCH_SIZE,
     on_progress=None,
+    inline_vectors: bool = True,
 ) -> dict[str, Any]:
     """Write vectors.jsonl, the sparse encoder, and index metadata by streaming.
 
@@ -40,21 +53,39 @@ def build_index(
     index_dir = output_dir / "index"
     index_dir.mkdir(parents=True, exist_ok=True)
 
+    # dense vectors also go to a float32 .npy matrix, row i = line i of
+    # vectors.jsonl, so consumers need not parse millions of JSON floats
+    total = registry.total_chunks
+    dense_path = index_dir / DENSE_FILE
+    matrix = np.lib.format.open_memmap(
+        dense_path, mode="w+", dtype=np.float32, shape=(total, embedder.dim)
+    ) if total else None
+
     records = 0
+    languages: dict[str, int] = {}
     with (index_dir / "vectors.jsonl").open("w", encoding="utf-8") as handle:
         for batch in _batched(_normalized_chunks(registry), batch_size):
             vectors = embedder.encode([chunk["canonical_text"] for chunk, _ in batch])
-            for (chunk, document), vector in zip(batch, vectors, strict=True):
-                handle.write(
-                    json.dumps(
-                        _record(chunk, document, vector, sparse, embedder.name, spec),
-                        ensure_ascii=False,
-                    )
-                    + "\n"
-                )
+            for offset, ((chunk, document), vector) in enumerate(
+                zip(batch, vectors, strict=True)
+            ):
+                record = _record(chunk, document, vector, sparse, embedder.name, spec)
+                record["row"] = records + offset
+                lang = record["payload"].get("language") or "unknown"
+                languages[lang] = languages.get(lang, 0) + 1
+                if not inline_vectors:
+                    record.pop("vector")
+                handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+                if matrix is not None:
+                    matrix[records + offset] = np.asarray(vector, dtype=np.float32)
             records += len(batch)
             if on_progress is not None:
                 on_progress(records)
+    if matrix is not None:
+        matrix.flush()
+        del matrix
+    else:
+        np.save(dense_path, np.zeros((0, embedder.dim), dtype=np.float32))
 
     sparse.save(index_dir / "sparse_encoder.json")
     write_corpus_chunks(registry, output_dir / "corpus" / "chunks.json")
@@ -63,13 +94,30 @@ def build_index(
         "format": INDEX_FORMAT,
         "schema_version": INDEX_SCHEMA_VERSION,
         "model": embedder.name,
+        # what a consumer needs to embed queries with the same model
+        "model_id": getattr(embedder, "model_id", embedder.name),
+        "query_prefix": getattr(embedder, "query_prefix", ""),
+        "passage_prefix": getattr(embedder, "passage_prefix", ""),
         "dimension": embedder.dim,
         "metric": "cosine",
         "dense_field": "text_dense",
         "sparse_field": "text_sparse",
+        "dense_file": f"index/{DENSE_FILE}",
+        "dense_dtype": "float32",
+        "inline_vectors": inline_vectors,
         "records": records,
         "documents": len(registry),
         "batch_size": batch_size,
+        "payload_schema_version": PAYLOAD_SCHEMA_VERSION,
+        "point_id_scheme": POINT_ID_SCHEME,
+        "sparse_tokenizer": sparse.tokenizer,
+        "sparse_corpus_fingerprint": sparse.corpus_fingerprint,
+        "sparse_query_encoding": "BM25SparseEncoder.encode_query",
+        "embedder_requested": spec.embedder,
+        "embedder_fallback": getattr(embedder, "fallback_from", None),
+        # units per language: with a lexical embedder, two or more languages
+        # mean single-language queries miss evidence (see consumer.search)
+        "languages": dict(sorted(languages.items())),
     }
     write_json(index_dir / "metadata.json", metadata)
     return metadata
@@ -107,9 +155,8 @@ def _record(
     model: str,
     spec: JobSpec,
 ) -> dict[str, Any]:
-    composite = (
-        f"{spec.corpus_name}:{chunk['doc_id']}:{chunk['chunk_type']}:"
-        f"{chunk['chunk_id']}:{model}:{EMBEDDING_VERSION}"
+    composite = point_composite(
+        chunk["doc_id"], chunk["chunk_type"], chunk["chunk_id"], model, EMBEDDING_VERSION
     )
     indices, values = sparse.encode(chunk["canonical_text"])
     return {

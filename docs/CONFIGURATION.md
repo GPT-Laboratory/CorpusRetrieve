@@ -114,7 +114,7 @@ reducing it does not degrade the images sent to a vision model.
 | Variable | Default | Notes |
 |---|---|---|
 | `DELETE_INPUTS_AFTER_PROCESSING` | `true` | Removes uploads once the worker finishes |
-| `CORS_ORIGINS` | `*` | Comma-separated. Restrict for deployment |
+| `CORS_ORIGINS` | empty | Comma-separated. Restrict for deployment |
 
 ## Validation rules
 
@@ -122,8 +122,46 @@ Startup fails when:
 
 - `STORAGE_BACKEND` is not `memory` or `s3`
 - `JOB_MODE` is not `inline` or `rq`
-- `DEFAULT_EMBEDDER` is not `hash` or `bge-m3`
+- `DEFAULT_EMBEDDER` is not `hash`, `hash-v2`, `bge-m3`, `auto` or `st:<model id>`
+- `STORAGE_BACKEND` is not `memory`, `local` or `s3`
 - `MAX_FILES_PER_JOB` or `MAX_UPLOAD_BYTES` is not positive
 - `MAX_CORPUS_UNCOMPRESSED_BYTES` is below `MAX_UPLOAD_BYTES`
 - `PAGE_PREVIEW_DPI` is outside 40–400
 - `JOB_MODE=rq` and `CREDENTIAL_ENCRYPTION_KEY` is missing or not a Fernet key
+
+
+## Quality, storage and security settings
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `OCR_LANGS` | `eng` | Tesseract languages; every one must be installed or OCR pages count as degraded |
+| `DEGRADED_POLICY` | `fail` | `fail`: degraded builds are published but the job fails; `warn`: completes with warnings |
+| `MAX_VLM_CALLS` | `0` | Cap on figure-description calls per job (0 = unlimited) |
+| `VLM_MAX_RETRIES` | `3` | Retries for rate-limited or overloaded VLM calls |
+| `VLM_TIMEOUT_SECONDS` | `120` | Time limit for one figure-description request |
+| `VLM_MAX_CONSECUTIVE_FAILURES` | `25` | Stop figure descriptions for the rest of the build after this many failures in a row (authentication, permission, missing-model and billing errors stop them at once) |
+| `TESSERACT_CMD` | empty | Full path of the Tesseract executable when it is not on `PATH` (Windows: `C:\Program Files\Tesseract-OCR\tesseract.exe`) |
+| `STORAGE_BACKEND` | `memory` | `memory` (lost on restart), `local` (files under `LOCAL_DATA_DIR`), `s3` |
+| `LOCAL_DATA_DIR` | `corpusretrieve-data` | Artifacts and job status for `STORAGE_BACKEND=local` |
+| `INDEX_INLINE_VECTORS` | `true` | Also keep dense vectors in `vectors.jsonl` (always in `index/dense.npy`) |
+| `API_KEYS` | empty | Comma-separated keys for `Authorization: Bearer` / `X-API-Key` |
+| `CORS_ORIGINS` | empty | Cross-origin callers to allow; the bundled UI is same-origin |
+
+Per job, the upload form accepts `allow_degraded=true`. Without it, intake
+problems that would fail the quality gate are rejected at upload with HTTP 422.
+See [Embeddings](EMBEDDINGS.md) for `DEFAULT_EMBEDDER` choices.
+
+## Deployment mode and strict publication provenance
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `DEPLOYMENT_MODE` | `development` | `production` enforces S3, RQ, API keys, a non-default S3 secret and non-wildcard CORS |
+| `REQUIRE_BIBLIOGRAPHIC` | `false` | Fails release readiness when publication metadata cannot be resolved |
+
+No group, subject, organization, source repository or vocabulary is configured
+in the application defaults. Supply these in external JSON document metadata.
+The default Docker image includes Tesseract English only; install any other
+languages and set `OCR_LANGS` explicitly.
+
+See [Document configuration](DOCUMENT_CONFIG.md) and
+[Production checklist](PRODUCTION_CHECKLIST.md).

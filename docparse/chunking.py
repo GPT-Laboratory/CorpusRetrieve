@@ -30,12 +30,15 @@ Design notes (why this differs from the naive "10 chunk types" recipe):
 """
 from __future__ import annotations
 
+import hashlib
 import re
+from collections import Counter
 from dataclasses import asdict, dataclass, field
 from typing import Any, Iterable
 
 from docparse.models import Element, ExtractionResult
 from docparse.serialize import rows_to_kv as _rows_to_kv
+from docparse.text import estimate_tokens, split_sentences
 
 # --------------------------------------------------------------------------- schema
 
@@ -54,8 +57,16 @@ class Chunk:
     role: str | None = None                     # abstract/methods/results/...
     pages: list[int] = field(default_factory=list)
     element_ids: list[str] = field(default_factory=list)
-    char_start: int | None = None               # span into document_text() -> late chunking
-    char_end: int | None = None
+    char_start: int | None = None               # min of spans (kept for older consumers)
+    char_end: int | None = None                 # max of spans
+    # the exact ranges of document_text() whose text this unit contains.
+    # A unit can be several ranges (overlap sentences, merged pieces); a single
+    # had min/max, which also covered text the unit did not contain.
+    spans: list[list[int]] = field(default_factory=list)
+    # where the unit is on the page, inline, so a consumer never needs the
+    # per-document element files to draw a citation box.
+    locators: list[dict] = field(default_factory=list)
+    language: str | None = None
     citations: list[dict] = field(default_factory=list)
     quantities: list[dict] = field(default_factory=list)
     linked_figures: list[str] = field(default_factory=list)   # "Figure 3"
@@ -127,10 +138,13 @@ class ChunkingResult:
 
 # --------------------------------------------------------------------------- helpers
 
-_SENT_SPLIT = re.compile(r"(?<=[.!?])\s+(?=[A-Z(“\"'0-9])")
 _WORD = re.compile(r"\S+")
-_FIG_MENTION = re.compile(r"\b(?:fig(?:ure)?s?\.?)\s*(\d+[A-Za-z]?)", re.I)
-_TAB_MENTION = re.compile(r"\btables?\s*(\d+[A-Za-z]?)", re.I)
+# English, Finnish (inflected: kuvassa, kuviossa, taulukossa), and Swedish forms
+_FIG_MENTION = re.compile(
+    r"\b(?:fig(?:ure)?s?\.?|kuv(?:a|io)\w*|figur(?:en|erna)?)\s*(\d+[A-Za-z]?)", re.I)
+_TAB_MENTION = re.compile(
+    r"\b(?:tables?|taulu(?:kko|ko)\w*|tabell(?:en|erna)?)\s*(\d+[A-Za-z]?)", re.I)
+_FIG_CAPTION_START = re.compile(r"\s*(FIGURE|FIG\.?|KUVA|KUVIO|FIGUR)\s+(\d+[A-Za-z]?)", re.I)
 _EQ_MENTION = re.compile(r"\b(?:eq(?:uation)?s?\.?)\s*\(?(\d{1,2})\)?", re.I)
 
 _TEXT_KINDS = ("narrative", "list_item")
@@ -166,12 +180,12 @@ def _clean_path(section_path: Iterable[str]) -> list[str]:
 
 
 def _est_tokens(text: str) -> int:
-    """Cheap, deterministic token estimate (~1.33 tokens/word for English prose)."""
-    return max(1, round(len(_WORD.findall(text)) * 4 / 3))
+    """Deterministic token estimate that does not undercount long Finnish words."""
+    return estimate_tokens(text)
 
 
 def _sentences(text: str, max_tokens: int | None = None) -> list[str]:
-    parts = [s.strip() for s in _SENT_SPLIT.split(text) if s.strip()]
+    parts = split_sentences(text)
     parts = parts or ([text.strip()] if text.strip() else [])
     if max_tokens is None:
         return parts
@@ -205,6 +219,45 @@ def _links_from_text(chunk: Chunk, text: str) -> None:
     chunk.linked_formulas = sorted({int(m) for m in _EQ_MENTION.findall(text)})
 
 
+def _merge_spans(spans: Iterable[list[int] | tuple[int, int]], gap: int = 2) -> list[list[int]]:
+    ordered = sorted([int(a), int(b)] for a, b in spans if a is not None and b is not None)
+    out: list[list[int]] = []
+    for a, b in ordered:
+        if out and a <= out[-1][1] + gap:
+            out[-1][1] = max(out[-1][1], b)
+        else:
+            out.append([a, b])
+    return out
+
+
+def _locators(els: list[Element]) -> list[dict]:
+    out = []
+    for el in els:
+        loc: dict[str, Any] = {"element_id": el.id, "page": el.page}
+        if el.bbox:
+            loc["bbox"] = [round(float(v), 2) for v in el.bbox]
+        elif (el.visual_ref or {}).get("bbox"):
+            loc["bbox"] = [round(float(v), 2) for v in el.visual_ref["bbox"]]
+            loc["source"] = "visual_ref"
+        if el.metadata.get("bbox_unit"):
+            loc["unit"] = el.metadata["bbox_unit"]
+        out.append(loc)
+    return out
+
+
+def _majority_language(els: list[Element]) -> str | None:
+    langs = Counter(el.language for el in els if el.language)
+    return langs.most_common(1)[0][0] if langs else None
+
+
+def _set_spans(chunk: Chunk, spans: list) -> None:
+    chunk.spans = _merge_spans(spans)
+    if chunk.spans:
+        chunk.char_start, chunk.char_end = chunk.spans[0][0], chunk.spans[-1][1]
+    else:
+        chunk.char_start = chunk.char_end = None
+
+
 def _collect_meta(chunk: Chunk, els: list[Element]) -> None:
     cites, qtys = [], []
     for el in els:
@@ -217,10 +270,12 @@ def _collect_meta(chunk: Chunk, els: list[Element]) -> None:
     pages = sorted({el.page for el in els if el.page})
     chunk.pages = pages
     chunk.element_ids = [el.id for el in els]
-    starts = [el.char_start for el in els if el.char_start is not None]
-    ends = [el.char_end for el in els if el.char_end is not None]
-    if starts and ends:
-        chunk.char_start, chunk.char_end = min(starts), max(ends)
+    chunk.locators = _locators(els)
+    chunk.language = _majority_language(els)
+    # element-level spans only for elements whose text is taken from the
+    # source; model-written figure descriptions have no source span
+    _set_spans(chunk, [(el.char_start, el.char_end) for el in els
+                       if el.char_start is not None and not el.metadata.get("derived_text")])
 
 
 class _Ids:
@@ -265,23 +320,22 @@ def _build_section_text_chunks(result: ExtractionResult, cfg: ChunkingConfig,
         group.append(el)
     flush()
 
-    # merge undersized trailing chunks into their predecessor within a section
+    # merge undersized trailing chunks into their predecessor, but ONLY within
+    # the same section and role: merging across both would mean, so a Results sentence
+    # could be stored as role=introduction under another section's heading
     merged: list[Chunk] = []
     for c in chunks:
         prev = merged[-1] if merged else None
         tiny = c.token_estimate < cfg.min_tokens
-        if (prev is not None and tiny
+        if (prev is not None and tiny and _same_scope(prev, c)
                 and prev.token_estimate + c.token_estimate <= cfg.max_tokens):
-            if prev.section_path != c.section_path:
-                prev.metadata.setdefault("absorbed_sections", []).append(
-                    " > ".join(c.section_path))
             prev.text = f"{prev.text}\n\n{c.text}"
             prev.embed_text = f"{prev.embed_text}\n\n{c.text}"
             prev.element_ids = list(dict.fromkeys(prev.element_ids + c.element_ids))
             prev.pages = sorted(set(prev.pages) | set(c.pages))
             prev.citations += [x for x in c.citations if x not in prev.citations]
             prev.quantities += [x for x in c.quantities if x not in prev.quantities]
-            prev.char_end = c.char_end or prev.char_end
+            _absorb_provenance(prev, c)
             prev.token_estimate = _est_tokens(prev.text)
             _links_from_text(prev, prev.text)
         else:
@@ -292,24 +346,32 @@ def _build_section_text_chunks(result: ExtractionResult, cfg: ChunkingConfig,
     packed: list[Chunk] = []
     for c in merged:
         prev = packed[-1] if packed else None
-        same_scope = (prev is not None and prev.role == c.role
-                      and prev.section_path[:1] == c.section_path[:1])
-        if (same_scope
+        if (prev is not None and _same_scope(prev, c)
                 and min(prev.token_estimate, c.token_estimate) < cfg.min_section_tokens
                 and prev.token_estimate + c.token_estimate <= cfg.target_tokens):
-            joiner = "\n\n" if prev.section_path != c.section_path else " "
+            joiner = " "
             prev.text = f"{prev.text}{joiner}{c.text}"
             prev.embed_text = f"{prev.embed_text}{joiner}{c.text}"
             prev.element_ids = list(dict.fromkeys(prev.element_ids + c.element_ids))
             prev.pages = sorted(set(prev.pages) | set(c.pages))
             prev.citations += [x for x in c.citations if x not in prev.citations]
             prev.quantities += [x for x in c.quantities if x not in prev.quantities]
-            prev.char_end = c.char_end or prev.char_end
+            _absorb_provenance(prev, c)
             prev.token_estimate = _est_tokens(prev.text)
             _links_from_text(prev, prev.text)
         else:
             packed.append(c)
     return packed
+
+
+def _same_scope(a: Chunk, b: Chunk) -> bool:
+    return a.role == b.role and a.section_path == b.section_path
+
+
+def _absorb_provenance(prev: Chunk, c: Chunk) -> None:
+    _set_spans(prev, prev.spans + c.spans)
+    seen = {loc["element_id"] for loc in prev.locators}
+    prev.locators += [loc for loc in c.locators if loc["element_id"] not in seen]
 
 
 def _pack_group(group: list[Element], cfg: ChunkingConfig, ids: _Ids,
@@ -321,53 +383,70 @@ def _pack_group(group: list[Element], cfg: ChunkingConfig, ids: _Ids,
     # sentence stream, remembering which element each sentence came from;
     # boilerplate sentences are dropped here so they never reach an embedding
     rx = _boiler_re(cfg.boilerplate_patterns)
-    stream: list[tuple[str, Element]] = []
+    stream: list[tuple[str, Element, tuple[int, int] | None]] = []
     for el in group:
+        cursor = 0
         for s in _sentences(el.text, max_tokens=cfg.max_tokens):
-            if not rx.search(s):
-                stream.append((s, el))
+            span = None
+            at = el.text.find(s, cursor)
+            if at >= 0:
+                cursor = at + len(s)
+                if el.char_start is not None:
+                    span = (el.char_start + at, el.char_start + at + len(s))
+            if not rx.search(s):                     # dropped text gets no span either
+                stream.append((s, el, span))
 
     out: list[Chunk] = []
-    buf: list[tuple[str, Element]] = []
+    buf: list[tuple[str, Element, tuple[int, int] | None]] = []
     buf_tokens = 0
 
     def emit() -> None:
         nonlocal buf, buf_tokens
         if not buf:
             return
-        text = " ".join(s for s, _ in buf)
+        text = " ".join(s for s, _, _ in buf)
         c = Chunk(chunk_id=ids.next("sec"), doc_id=ids.doc_id, chunk_type="section_text",
                   text=text, section_path=section_path, role=role,
                   embed_text=f"[{crumb}]\n{text}" if crumb else text,
                   token_estimate=_est_tokens(text))
         uniq: dict[str, Element] = {}
-        for _, el in buf:
+        for _, el, _ in buf:
             uniq.setdefault(el.id, el)
         _collect_meta(c, list(uniq.values()))
+        spans = [sp for _, el, sp in buf if sp is not None]
+        if len(spans) == len(buf):
+            _set_spans(c, spans)                 # sentence-exact
+        else:                                    # some piece could not be located
+            c.metadata["span_precision"] = "element"
         _links_from_text(c, text)
         out.append(c)
         # sentence-level overlap into the next buffer — but never carry over a
         # huge piece (word-window splits would then duplicate whole chunks)
         tail = buf[-cfg.overlap_sentences:] if cfg.overlap_sentences else []
-        if sum(_est_tokens(s) for s, _ in tail) > max(1, cfg.target_tokens // 4):
+        if sum(_est_tokens(s) for s, _, _ in tail) > max(1, cfg.target_tokens // 4):
             tail = []
         buf = list(tail)
-        buf_tokens = sum(_est_tokens(s) for s, _ in buf)
+        buf_tokens = sum(_est_tokens(s) for s, _, _ in buf)
 
-    def pieces(sent: str) -> list[str]:
+    def pieces(sent: str, span) -> list[tuple[str, tuple[int, int] | None]]:
         if _est_tokens(sent) <= cfg.max_tokens:
-            return [sent]
-        words = sent.split()
+            return [(sent, span)]
+        out_: list[tuple[str, tuple[int, int] | None]] = []
+        words = list(re.finditer(r"\S+", sent))
         step = max(1, cfg.target_tokens * 3 // 4)          # words per piece
-        return [" ".join(words[i:i + step]) for i in range(0, len(words), step)]
+        for i in range(0, len(words), step):
+            grp = words[i:i + step]
+            a, b = grp[0].start(), grp[-1].end()
+            out_.append((sent[a:b], (span[0] + a, span[0] + b) if span else None))
+        return out_
 
-    for raw_sent, el in stream:
-        for sent in pieces(raw_sent):
+    for raw_sent, el, span in stream:
+        for sent, sp in pieces(raw_sent, span):
             t = _est_tokens(sent)
             if buf and (buf_tokens + t > cfg.max_tokens
                         or (buf_tokens >= cfg.target_tokens)):
                 emit()
-            buf.append((sent, el))
+            buf.append((sent, el, sp))
             buf_tokens += t
     if buf:
         # avoid emitting an overlap-only remainder that duplicates the previous chunk
@@ -413,7 +492,13 @@ def _build_claim_chunks(result: ExtractionResult, cfg: ChunkingConfig, ids: _Ids
             c.section_path = _clean_path(el.section_path)
             c.element_ids = [el.id]
             c.pages = [el.page] if el.page else []
-            c.char_start, c.char_end = el.char_start, el.char_end
+            c.locators = _locators([el])
+            c.language = el.language
+            at = el.text.find(text)
+            if at >= 0 and el.char_start is not None:
+                _set_spans(c, [(el.char_start + at, el.char_start + at + len(text))])
+            else:
+                _set_spans(c, [(el.char_start, el.char_end)])
         c.quantities = cl.get("quantities", [])
         _links_from_text(c, el.text if el is not None else text)
         out.append(c)
@@ -504,10 +589,12 @@ def _build_figure_chunks(result: ExtractionResult, cfg: ChunkingConfig, ids: _Id
     for el in result.elements:
         if el.kind != "figure":
             continue
+        if el.metadata.get("repeated_image") or el.metadata.get("not_a_figure"):
+            continue                            # logos, banners, text boxes
         cap = captions.get(el.id)
         label = el.metadata.get("label") or (cap.metadata.get("label") if cap is not None else None)
         if not label and cap is not None and cap.text:
-            if (m := re.match(r"\s*(FIGURE|FIG\.?)\s+(\d+)", cap.text, re.I)):
+            if (m := _FIG_CAPTION_START.match(cap.text)):
                 label = f"Figure {m.group(2)}"
         name = label or "Figure"
         crumb = _breadcrumb(title, el.section_path, extra=name)
@@ -529,7 +616,8 @@ def _build_figure_chunks(result: ExtractionResult, cfg: ChunkingConfig, ids: _Id
                    token_estimate=_est_tokens(body), visual_ref=el.visual_ref,
                    metadata={"label": label,
                              "figure_type": (el.structured or {}).get("figure_type")
-                             or el.metadata.get("vlm_type")})
+                             or el.metadata.get("vlm_type"),
+                             "derived_text": bool(el.metadata.get("derived_text"))})
         _collect_meta_single(fc, el, cap)
         out.append(fc)
 
@@ -557,7 +645,9 @@ def _build_figure_chunks(result: ExtractionResult, cfg: ChunkingConfig, ids: _Id
                              pages=[el.page] if el.page else [],
                              visual_ref=el.visual_ref,
                              token_estimate=_est_tokens(ptext),
-                             metadata={"label": label, "panel": p.get("id")}))
+                             locators=_locators([el]),
+                             metadata={"label": label, "panel": p.get("id"),
+                                       "derived_text": True}))
     return out
 
 
@@ -673,6 +763,33 @@ def _build_summary_chunks(result: ExtractionResult, cfg: ChunkingConfig, ids: _I
 
 # --------------------------------------------------------------------------- entry
 
+_ID_TAG = {"section_text": "sec", "claim": "claim", "table_summary": "tab",
+           "table_row_group": "tabrows", "table_fact": "fact", "figure": "fig",
+           "figure_panel": "figpanel", "formula": "eq", "summary": "sum", "reference": "ref"}
+
+
+def _content_chunk_ids(chunks: list[Chunk], doc_id: str) -> None:
+    """Replace positional counters with content-derived chunk IDs.
+
+    Positional IDs (``doc::sec::0007``) renumber every later unit when one
+    paragraph is inserted. These IDs hash the unit type, its element IDs (themselves content
+    derived), and its text, so an unchanged unit keeps its ID across builds.
+    """
+    mapping: dict[str, str] = {}
+    seen: Counter[str] = Counter()
+    for c in chunks:
+        h = hashlib.sha256("\x1f".join(
+            [c.chunk_type, ",".join(c.element_ids), c.text]).encode("utf-8")).hexdigest()[:12]
+        base = f"{doc_id}::{_ID_TAG.get(c.chunk_type, c.chunk_type)}::{h}"
+        seen[base] += 1
+        new = base if seen[base] == 1 else f"{base}-{seen[base]}"
+        mapping[c.chunk_id] = new
+        c.chunk_id = new
+    for c in chunks:
+        if c.parent_chunk_id in mapping:
+            c.parent_chunk_id = mapping[c.parent_chunk_id]
+
+
 def chunk_result(result: ExtractionResult, cfg: ChunkingConfig | None = None,
                  doc_id: str | None = None) -> ChunkingResult:
     cfg = cfg or ChunkingConfig()
@@ -693,6 +810,8 @@ def chunk_result(result: ExtractionResult, cfg: ChunkingConfig | None = None,
     cr.chunks += _build_summary_chunks(result, cfg, ids, title)
     if cfg.emit_references:
         cr.chunks += _build_reference_chunks(result, ids)
+
+    _content_chunk_ids(cr.chunks, doc_id)
 
     # ---- validation & stats (the eval loop needs these) -------------------
     counts: dict[str, int] = {}

@@ -62,6 +62,10 @@ class JobStatus(BaseModel):
     created_at: float
     updated_at: float
     outputs_ready: bool
+    artifacts_available: bool = False
+    release_ready: bool | None = None
+    quality_reasons: list[str] = Field(default_factory=list)
+    corpus_name: str | None = None
     links: JobLinks
 
 

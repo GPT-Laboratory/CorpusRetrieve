@@ -21,12 +21,14 @@ class APIError(Exception):
         detail: str,
         title: str | None = None,
         headers: dict[str, str] | None = None,
+        errors: list[dict] | None = None,
     ) -> None:
         self.status_code = status_code
         self.code = code
         self.detail = detail
         self.title = title or HTTPStatus(status_code).phrase
         self.headers = headers or {}
+        self.errors = errors
 
 
 def _request_id(request: Request) -> str:
@@ -83,6 +85,7 @@ def install_error_handling(app: FastAPI) -> None:
             exc.code,
             exc.detail,
             exc.title,
+            errors=exc.errors,
             headers=exc.headers,
         )
 

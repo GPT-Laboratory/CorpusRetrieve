@@ -10,6 +10,31 @@ MIN_POINTS_FOR_PROJECTION = 4
 MAX_POINT_TEXT = 160
 
 
+def project_records(records: list[dict[str, Any]], matrix: np.ndarray) -> dict[str, Any]:
+    """Project already-sampled records whose dense vectors are rows of ``matrix``."""
+    if not len(records) or matrix.size == 0:
+        return {"method": "none", "n": 0, "points": []}
+    coordinates, method = _reduce(np.asarray(matrix, dtype="float32"))
+    normalized = _normalize(coordinates)
+    return {"method": method, "n": len(records),
+            "points": [_point(record, x, y) for record, (x, y) in zip(records, normalized,
+                                                                      strict=True)]}
+
+
+def _point(record: dict[str, Any], x: float, y: float) -> dict[str, Any]:
+    payload = record.get("payload", {})
+    return {
+        "id": record["id"],
+        "chunk_id": payload.get("chunk_id"),
+        "doc_id": payload.get("doc_id"),
+        "type": payload.get("chunk_type"),
+        "x": round(float(x), 4),
+        "y": round(float(y), 4),
+        "pages": payload.get("pages"),
+        "text": (payload.get("raw_text") or "")[:MAX_POINT_TEXT],
+    }
+
+
 def project_vectors(lines: Iterable[str], limit: int) -> dict[str, Any]:
     """Reduce dense chunk vectors to two dimensions for the embedding map.
 

@@ -1,6 +1,6 @@
 # CorpusRetrieve
 
-**Version 1.0.0**
+**Version 2.0.0 — consolidated production baseline**
 
 CorpusRetrieve converts one document or an entire corpus into portable,
 provenance-preserving retrieval artifacts: typed chunks, dense and sparse
@@ -49,6 +49,7 @@ documents/<document-id>/
     pages/page-1.png
 index/
   vectors.jsonl
+  dense.npy
   sparse_encoder.json
   metadata.json
 knowledge_graph/
@@ -79,15 +80,76 @@ as a live spine.
 
 ---
 
+## Building a large corpus (resumable, additive)
+
+```bash
+python tools/manifest_to_document_config.py manifest.json -o config.json \
+    --files-root downloads/ --report conversion_report.json
+corpusretrieve build downloads/ --out build/ --config config.json
+# add files or update the manifest, then run the same command again:
+# unchanged files are reused, only new ones are parsed
+```
+
+## Verifying and consuming a bundle
+
+```bash
+corpusretrieve verify bundle.zip --require-release-ready   # 0 ok, 1 invalid, 2 not release-ready
+corpusretrieve repair outputs/                              # rebuild graph exports, re-seal catalog
+```
+
+```python
+from corpusretrieve.consumer import PortableIndex
+index = PortableIndex.load("bundle.zip")
+for hit in index.search("material performance", k=5):
+    print(hit.score, hit.payload["bibliographic"], hit.payload["locators"][0])
+```
+
+For a bilingual corpus with a lexical index, pass the question in the other
+language too, from any translator you choose:
+
+```python
+hits = index.search("material performance", k=10,
+                    extra_queries=["materials performance"])
+# or: index.search(q, translator=my_translate)  # returns a list of query strings
+```
+
+Every manifest carries a `quality` block and `release_ready`. With the default
+`DEGRADED_POLICY=fail`, a build with missing OCR, failed figure descriptions,
+filename collisions or unmatched `document_config` keys is published but marked
+failed, and the web interface still shows and offers every output. Problems
+that would fail the gate whatever the build produces (unmatched
+`document_config` keys, name collisions) are rejected at upload. See
+`CHANGELOG.md` for the 2.0.0 changes.
+
+### Long builds on one machine
+
+```bash
+STORAGE_BACKEND=local LOCAL_DATA_DIR=./corpusretrieve-data \
+  python -m uvicorn service.app:app --port 8000
+```
+
+Outputs and job status are written to disk, survive restarts, and reopen from
+the start page or `http://localhost:8000/#job/<job id>`. On Windows, set
+`TESSERACT_CMD` to `tesseract.exe` if Tesseract is not on `PATH`.
+
+### Semantic embeddings
+
+`pip install -r requirements-embeddings.txt` enables multilingual E5 and
+BGE-M3. `corpusretrieve reindex <bundle.zip> --embedder
+st:intfloat/multilingual-e5-small --out <dir>` adds them to a finished build
+without re-extracting it. See [docs/EMBEDDINGS.md](docs/EMBEDDINGS.md).
+
+---
+
 ## Quick start
 
 Local development, no external services:
 
 ```bash
-python -m venv venv
+python -m venv .venv
 source .venv/bin/activate          # Windows: .venv\Scripts\Activate
 python -m pip install --upgrade pip 
-pip install -r requirements.txt
+pip install -e .
 
 cp .env.example .env               # Windows: Copy-Item .env.example .env
 ```
@@ -425,4 +487,37 @@ authorization. CorpusRetrieve does not provide these.
 | [docs/WEB_INTERFACE.md](docs/WEB_INTERFACE.md) | Modes, views, and asset structure |
 | [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) | Compose, scaling, operations |
 | [docs/CONFIGURATION.md](docs/CONFIGURATION.md) | Every environment variable |
+| [docs/EMBEDDINGS.md](docs/EMBEDDINGS.md) | Lexical and semantic models, re-indexing a build |
+| [docs/RELEASE_2.0.0.md](docs/RELEASE_2.0.0.md) | Release contract and upgrading from 1.0.x |
 | [CHANGELOG.md](CHANGELOG.md) | Release history |
+
+---
+
+## Provenance and group-oriented ingestion
+
+The per-document configuration JSON holds publication metadata and stable IDs.
+The optional collection-level `__collection__` block carries grouping and provenance context.
+A strict provenance gate is enabled with `REQUIRE_BIBLIOGRAPHIC=true`, the
+web upload checkbox, or `corpusretrieve build --require-bibliographic`.
+When no authoritative record is supplied, PDF-extracted DOI/title hints are labelled
+`origin: "extracted"`; they are not externally validated.
+
+For generic manifests with nested `scenarios[].themes[].documents[]` structure,
+use `tools/prepare_theme_jobs.py` to create one configuration per logical group:
+
+```bash
+python tools/prepare_theme_jobs.py external_manifest.json --out group_jobs --max-files 150
+corpusretrieve build ./downloaded_files --config group_jobs/example_group/full_theme.path_config.json \
+  --key-by path --only-config-files --require-bibliographic \
+  --out ./outputs/example_group --corpus-name example_group
+```
+
+`external_manifest.json`, PDFs, output bundles, and group configurations are
+**consumer-owned data**. No project, sector, vocabulary, or theme list is built
+into CorpusRetrieve. The importer handles a generic documented manifest shape,
+not a particular external collection.
+
+See [Document configuration](docs/DOCUMENT_CONFIG.md),
+[Manifest and group workflows](docs/MANIFEST_WORKFLOWS.md),
+[Production deployment](docs/DEPLOYMENT.md), and
+[Release contract](docs/RELEASE_2.0.0.md).

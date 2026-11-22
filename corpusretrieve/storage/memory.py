@@ -17,8 +17,10 @@ class MemoryArtifactStore:
         self.put_bytes(key, stream.read(), content_type)
 
     def put_bytes(self, key: str, data: bytes, content_type: str | None = None) -> None:
+        # bytes() of a bytes object is the same object; only copy mutable buffers
+        value = data if isinstance(data, bytes) else bytes(data)
         with self._lock:
-            self._objects[key] = (bytes(data), content_type)
+            self._objects[key] = (value, content_type)
 
     def get_bytes(self, key: str) -> bytes:
         with self._lock:

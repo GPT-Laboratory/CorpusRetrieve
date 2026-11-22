@@ -17,15 +17,17 @@ it and removing the container.
 ## Prepare
 
 ```bash
-cp .env.example .env
-make key          # prints a Fernet key
+cp .env.production.example .env
+python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
 ```
 
-Required edits in `.env`:
+Required edits in `.env` (replace **all** example secrets, including the API key):
 
 ```dotenv
+DEPLOYMENT_MODE=production
 STORAGE_BACKEND=s3
 JOB_MODE=rq
+API_KEYS=<long-random-token>
 S3_SECRET_KEY=<strong-random-secret>
 MINIO_ROOT_PASSWORD=<the same secret>
 CREDENTIAL_ENCRYPTION_KEY=<generated Fernet key>
@@ -103,25 +105,34 @@ removes them immediately.
 carry a request ID returned in `X-Request-ID` and in the problem document, which
 is the value to search for when correlating a report with server logs.
 
-**Backups.** Job state in Redis is derived and expendable; the artifact bucket
-is the only thing worth backing up. A lost Redis makes completed jobs
+**Backups.** Job state in Redis is derived and expendable; the artifact bucket and the source/manifest records
+are essential for reproducibility; Redis job state should also be preserved as needed. A lost Redis makes completed jobs
 unreadable through the API even though the objects still exist, so treat job
 state as a cache with a retention window, not a record.
 
-## Hardening
+## Production exposure and security
 
-CorpusRetrieve ships no authentication. Before exposing it beyond a trusted
-network, add:
+The Docker Compose stack publishes the API and MinIO ports to **loopback**
+by default. Use a TLS-terminating, authenticated reverse proxy when exposing
+the service. `DEPLOYMENT_MODE=production` refuses startup with an open API
+(no `API_KEYS`), memory storage, inline jobs, wildcard CORS, or default S3
+secrets. Redis and MinIO must remain on private networks.
 
-- an authentication gateway in front of the API
-- TLS termination
-- rate limiting on `POST /v1/jobs`
-- malware scanning of uploads
-- tenant authorization, since any caller holding a job ID can read that job
-- a restricted `CORS_ORIGINS` value instead of `*`
+**UI caveat:** The stock browser console cannot currently enter a
+CorpusRetrieve service API key; for production, set `CONSOLE_ENABLED=false`
+and use authenticated API clients, or implement/test a gateway that securely
+provides credentials. Do not disable authentication to make the UI work.
 
-Also review `MAX_UPLOAD_BYTES`, `MAX_FILES_PER_JOB`, and
-`MAX_CORPUS_UNCOMPRESSED_BYTES` against available worker memory and disk.
+Also apply rate limits, upload malware inspection, host resource quotas,
+per-job authorization, dependency/image scanning, monitoring and tested backup
+restoration. The current API key is shared-access authentication and is not
+a replacement for per-tenant authorization.
+
+The default image has only the `eng` Tesseract language pack. Install required
+OCR packs for each document collection in a custom image and set `OCR_LANGS`
+to the exact installed language codes. `hash` is meant for repeatable smoke
+tests; use a trained embedding backend and validate retrieval quality before
+production use. See [Production checklist](PRODUCTION_CHECKLIST.md).
 
 ## Troubleshooting
 

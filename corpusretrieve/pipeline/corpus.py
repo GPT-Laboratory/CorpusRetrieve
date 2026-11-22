@@ -24,6 +24,11 @@ class DocumentRecord:
     chunks: int
     metadata: dict[str, Any] = field(default_factory=dict)
     external_id: str | None = None
+    quality: dict[str, Any] = field(default_factory=dict)
+    resumed: bool = False
+    # processing time per document stage; kept out of the per-document
+    # artifacts so that rebuilding identical inputs yields identical files
+    timing_ms: dict[str, int] = field(default_factory=dict)
 
     def to_manifest_entry(self) -> dict[str, Any]:
         return {
@@ -32,6 +37,9 @@ class DocumentRecord:
             "sha256": self.sha256,
             "chunks": self.chunks,
             "metadata": self.metadata,
+            "quality": self.quality,
+            "resumed": self.resumed,
+            "timing_ms": self.timing_ms,
         }
 
 
@@ -54,6 +62,7 @@ class CorpusRegistry:
         self.output_dir = output_dir
         self.records: list[DocumentRecord] = []
         self.failures: list[DocumentFailure] = []
+        self.duplicates: list[dict[str, Any]] = []
 
     def add(self, record: DocumentRecord) -> None:
         self.records.append(record)
@@ -72,8 +81,15 @@ class CorpusRegistry:
         return self.output_dir / "documents" / doc_id / CHUNKS_FILENAME
 
     def load(self, record: DocumentRecord) -> dict[str, Any]:
-        """Read one document's chunk file back into memory."""
-        return json.loads(self.document_path(record.doc_id).read_text(encoding="utf-8"))
+        """Read one document's chunk file back into memory.
+
+        The metadata always comes from the current record, not from the file:
+        a resumed document must pick up an updated document_config (new DOIs,
+        merged duplicate records) instead of the metadata of the earlier run.
+        """
+        document = json.loads(self.document_path(record.doc_id).read_text(encoding="utf-8"))
+        document["metadata"] = record.metadata
+        return document
 
     def iter_documents(self) -> Iterator[dict[str, Any]]:
         """Yield each document's chunk payload one at a time."""

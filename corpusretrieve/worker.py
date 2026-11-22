@@ -49,9 +49,16 @@ def process_job(job_id: str) -> None:
             emit_page_previews=settings.emit_page_previews,
             page_preview_dpi=settings.page_preview_dpi,
             max_page_previews=settings.max_page_previews_per_document,
+            ocr_langs=settings.ocr_langs,
+            max_vlm_calls=settings.max_vlm_calls or None,
+            vlm_max_retries=settings.vlm_max_retries,
+            vlm_timeout_seconds=settings.vlm_timeout_seconds,
+            vlm_max_consecutive_failures=settings.vlm_max_consecutive_failures,
         ),
         batch_size=settings.embedding_batch_size,
+        inline_vectors=settings.index_inline_vectors,
     )
+    result: dict[str, Any] = {}
 
     try:
         with tempfile.TemporaryDirectory(prefix=f"corpusretrieve-{job_id}-") as temp:
@@ -63,7 +70,7 @@ def process_job(job_id: str) -> None:
 
             try:
                 input_paths = _materialize_inputs(store, spec, inputs_dir)
-                processor.run(spec, input_paths, outputs_dir)
+                result = processor.run(spec, input_paths, outputs_dir)
             except Exception as exc:  # noqa: BLE001 - salvage before reporting
                 reason = f"{type(exc).__name__}: {_redact(str(exc), api_key)}"
                 logger.exception("Job %s failed; publishing partial outputs", job_id)
@@ -75,6 +82,35 @@ def process_job(job_id: str) -> None:
             artifacts = _publish_artifacts(store, job_id, outputs_dir)
 
         failures = processor.failures()
+        quality = (result.get("manifest") or {}).get("quality") or {}
+        warnings = list(spec.warnings)
+        if failures:
+            warnings.append(_skip_warning(failures))
+        if quality.get("degraded"):
+            warnings.append("Degraded build: " + "; ".join(quality.get("reasons", [])))
+        gate_closed = (quality.get("degraded") and settings.degraded_policy == "fail"
+                       and not spec.allow_degraded)
+        common = dict(
+            manifest_key=f"jobs/{job_id}/artifacts/manifest.json",
+            bundle_key=f"jobs/{job_id}/artifacts/bundle.zip",
+            artifacts=artifacts,
+            stages=processor.stages(),
+            warnings=warnings,
+            quality={"release_ready": bool(quality.get("release_ready", True)),
+                     "degraded": bool(quality.get("degraded")),
+                     "reasons": list(quality.get("reasons", []))},
+        )
+        if gate_closed:
+            # fail loudly, but never throw the work away: every artifact is
+            # published and the manifest says release_ready=false
+            jobs.update_state(
+                job_id, state="failed", stage="failed", progress=100,
+                message="Artifacts are available but the build is degraded and not "
+                        "release-ready (resubmit with allow_degraded=true to accept it)",
+                error="QualityGateFailed: " + "; ".join(quality.get("reasons", [])),
+                **common,
+            )
+            return
         jobs.update_state(
             job_id,
             state="completed",
@@ -85,12 +121,8 @@ def process_job(job_id: str) -> None:
                 if not failures
                 else f"Artifacts are ready; {len(failures)} document(s) were skipped"
             ),
-            manifest_key=f"jobs/{job_id}/artifacts/manifest.json",
-            bundle_key=f"jobs/{job_id}/artifacts/bundle.zip",
-            artifacts=artifacts,
-            stages=processor.stages(),
-            warnings=spec.warnings + [_skip_warning(failures)] if failures else spec.warnings,
             error=None,
+            **common,
         )
     finally:
         credentials.delete(job_id)
@@ -161,6 +193,7 @@ def _report_failure(
         ),
         artifacts=artifacts,
         stages=processor.stages(),
+        quality={"release_ready": False, "degraded": True, "reasons": ["incomplete_build"]},
         error=reason,
     )
 
@@ -168,7 +201,13 @@ def _report_failure(
 def _materialize_inputs(store, spec: JobSpec, inputs_dir: Path) -> list[Path]:
     paths = []
     for index, item in enumerate(spec.files):
-        path = inputs_dir / f"{index:04d}-{Path(item.filename).name}"
+        # Staging paths are implementation details, not document identities.
+        # Carry the complete original filename through JobSpec/manifest/payloads,
+        # but use bounded disk names to avoid Windows MAX_PATH (260 chars).
+        suffix = Path(item.filename).suffix
+        if len(suffix) > 16 or not suffix.lstrip(".").isalnum():
+            suffix = ".bin"
+        path = inputs_dir / f"{index:04d}{suffix.lower()}"
         path.write_bytes(store.get_bytes(item.storage_key))
         paths.append(path)
     return paths

@@ -11,14 +11,17 @@ Cypher.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import re
+from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
 import networkx as nx
 
-from docparse.vectorization.ids import COLLECTION_OF, point_uuid
+from docparse.vectorization.canonical import BIBLIOGRAPHIC_FIELDS
+from docparse.vectorization.ids import COLLECTION_OF, point_composite, point_uuid
 
 _CHUNK_NODE_TYPE = {
     "claim": "Claim", "section_text": "Chunk", "summary": "Chunk",
@@ -62,9 +65,19 @@ class KnowledgeGraph:
     def build_from_chunks(self, doc: dict, tenant: str, embed_model: str,
                           embed_version: str) -> dict[str, int]:
         doc_id = doc["doc_id"]
-        title = (doc.get("stats") or {}).get("doc_title") or doc_id
+        meta = doc.get("metadata") or {}
+        records = meta.get("records") or []
+        record = records[0] if len(records) == 1 else meta
+        # bibliographic identity from the collection manifest wins over the
+        # title the extractor guessed from page 1
+        title = (record.get("title") or (doc.get("stats") or {}).get("paper", {}).get("title")
+                 or (doc.get("stats") or {}).get("doc_title") or doc_id)
+        bib = {k: (", ".join(v) if isinstance(v, list) else v)
+               for k, v in record.items() if k in BIBLIOGRAPHIC_FIELDS and k not in ("title", "source")}
         paper = self._node(f"paper:{doc_id}", "Paper", title=title,
-                           source=doc.get("source"))
+                           source=doc.get("source"), corpus=tenant,
+                           records=len(records) or None, catalog_source=record.get("source"),
+                           bibliographic_origin=record.get("origin"), **bib)
         sections: dict[str, str] = {}
         table_nodes: dict[str, str] = {}
         figure_nodes: dict[str, str] = {}
@@ -87,7 +100,13 @@ class KnowledgeGraph:
             ctype = c["chunk_type"]
             cid = c["chunk_id"]
             ntype = _CHUNK_NODE_TYPE.get(ctype, "Chunk")
-            node = self._node(f"{ntype.lower()}:{cid}", ntype,
+            md = c.get("metadata") or {}
+            node_id = f"{ntype.lower()}:{cid}"
+            if ctype == "reference" and md.get("citation_key"):
+                # one node per cited work: the bibliography entry and every
+                # in-text citation of it resolve to the same node (not two nodes)
+                node_id = f"citekey:{doc_id}:{md['citation_key']}"
+            node = self._node(node_id, ntype,
                               chunk_type=ctype, role=c.get("role"),
                               pages=",".join(map(str, c.get("pages", []))),
                               label=(c.get("metadata") or {}).get("label"),
@@ -95,7 +114,7 @@ class KnowledgeGraph:
             chunk_nodes[cid] = node
 
             # provenance + vector linkage (NODE_LINKS_VECTOR_POINT)
-            composite = f"{tenant}:{doc_id}:{ctype}:{cid}:{embed_model}:{embed_version}"
+            composite = point_composite(doc_id, ctype, cid, embed_model, embed_version)
             coll = COLLECTION_OF.get(ctype, "sections")
             self._edge(node, self._node(
                 f"vec:{point_uuid(composite)}", "VectorPoint",
@@ -105,10 +124,14 @@ class KnowledgeGraph:
             sp = c.get("section_path") or []
             parent = paper
             for depth, sec in enumerate(sp):
+                # identity is the whole heading path: two "Results" sections
+                # under different chapters are different sections
+                path_key = hashlib.sha256(" / ".join(sp[:depth + 1]).encode("utf-8")
+                                          ).hexdigest()[:12]
                 sid = sections.setdefault(
-                    f"section:{doc_id}:{depth}:{sec}",
-                    self._node(f"section:{doc_id}:{depth}:{sec}", "Section",
-                               title=sec, depth=depth))
+                    f"section:{doc_id}:{path_key}",
+                    self._node(f"section:{doc_id}:{path_key}", "Section",
+                               title=sec, depth=depth, path=" / ".join(sp[:depth + 1])))
                 self._edge(paper, sid, "PAPER_HAS_SECTION")
                 if parent != paper:
                     self._edge(parent, sid, "SECTION_HAS_SUBSECTION")
@@ -124,8 +147,14 @@ class KnowledgeGraph:
                 table_nodes[lab] = node
                 self._edge(paper, node, "PAPER_HAS_TABLE")
             if ntype == "TableRowGroup":
+                # the structural parent is exact; the label is only a fallback.
+                # linking by label alone would lose unlabelled tables (all Finnish
+                # "Taulukko N" tables) lost their row groups.
+                parent_cid = c.get("parent_chunk_id")
                 lab = (c.get("metadata") or {}).get("label")
-                if lab and lab in table_nodes:
+                if parent_cid in chunk_nodes:
+                    self._edge(chunk_nodes[parent_cid], node, "TABLE_HAS_ROW_GROUP")
+                elif lab and lab in table_nodes:
                     self._edge(table_nodes[lab], node, "TABLE_HAS_ROW_GROUP")
                 # Cell facts remain graph nodes instead of vector records.
                 for i, f in enumerate((c.get("metadata") or {}).get("facts") or []):
@@ -210,8 +239,26 @@ class KnowledgeGraph:
 
     # ---- exports -------------------------------------------------------------------
     def export(self, outdir: str | Path) -> dict[str, str]:
+        """Write every format; one failing format never prevents the others.
+
+        Returns ``{format: path}`` for written files and, when something
+        failed, ``errors: {format: message}`` so the manifest can record it.
+        """
         out = Path(outdir)
         out.mkdir(parents=True, exist_ok=True)
+        written: dict = {}
+        errors: dict[str, str] = {}
+        for name, writer in (("json", self._export_json), ("graphml", self._export_graphml),
+                             ("cypher", self._export_cypher)):
+            try:
+                written[name] = str(writer(out))
+            except Exception as exc:              # noqa: BLE001 - recorded, not hidden
+                errors[name] = f"{type(exc).__name__}: {exc}"
+        if errors:
+            written["errors"] = errors
+        return written
+
+    def _export_graphml(self, out: Path) -> Path:
         gml = out / "knowledge_graph.graphml"
         g2 = nx.MultiDiGraph()
         for n, d in self.g.nodes(data=True):        # graphml needs scalar attrs
@@ -227,25 +274,67 @@ class KnowledgeGraph:
                 **{kk: _xml_safe_text(vv) for kk, vv in d.items()},
             )
         nx.write_graphml(g2, gml)
+        return gml
 
+    def _export_json(self, out: Path) -> Path:
         js = out / "knowledge_graph.json"
         js.write_text(json.dumps({
             "nodes": [{"id": n, **d} for n, d in self.g.nodes(data=True)],
             "edges": [{"source": a, "target": b, "rel": k, **d}
                       for a, b, k, d in self.g.edges(keys=True, data=True)],
         }, ensure_ascii=False, indent=1), encoding="utf-8")
+        return js
 
+    def _export_cypher(self, out: Path, batch: int = 500) -> Path:
+        """Neo4j/Memgraph import script.
+
+        One unlabelled ``MATCH (a {id: ...})`` per edge would be a full scan per
+        statement, over a million of them for a large corpus. The script instead
+        creates a uniqueness constraint per label, then loads nodes and edges in
+        labelled ``UNWIND`` batches that use those indexes.
+        """
         cy = out / "knowledge_graph.cypher"
+        label_of = {n: _cy_label(d.get("ntype", "Node")) for n, d in self.g.nodes(data=True)}
+        by_label: dict[str, list] = defaultdict(list)
+        for n, d in self.g.nodes(data=True):
+            props = {re.sub(r"[^A-Za-z0-9_]", "_", k): v for k, v in d.items()
+                     if k != "ntype" and v not in (None, "")}
+            by_label[label_of[n]].append({"id": n, "props": props})
+        by_rel: dict[tuple, list] = defaultdict(list)
+        for a, b, k, _ in self.g.edges(keys=True, data=True):
+            rel = re.sub(r"[^A-Z_]", "_", k.upper())
+            by_rel[(label_of[a], rel, label_of[b])].append({"a": a, "b": b})
         with cy.open("w", encoding="utf-8") as fh:
-            fh.write("// Generated by CorpusRetrieve v1.0.0 for Neo4j or Memgraph\n")
-            for n, d in self.g.nodes(data=True):
-                props = {k: v for k, v in d.items() if k != "ntype" and v not in (None, "")}
-                fh.write(f"MERGE (n:{d.get('ntype','Node')} {{id: {json.dumps(n)}}}) "
-                         f"SET n += {_cyprops(props)};\n")
-            for a, b, k, _ in self.g.edges(keys=True, data=True):
-                fh.write(f"MATCH (a {{id: {json.dumps(a)}}}), (b {{id: {json.dumps(b)}}}) "
-                         f"MERGE (a)-[:{re.sub(r'[^A-Z_]', '_', k.upper())}]->(b);\n")
-        return {"graphml": str(gml), "json": str(js), "cypher": str(cy)}
+            fh.write("// Generated by CorpusRetrieve for Neo4j 5 or Memgraph\n")
+            for label in sorted(by_label):
+                fh.write(f"CREATE CONSTRAINT IF NOT EXISTS FOR (n:{label}) "
+                         f"REQUIRE n.id IS UNIQUE;\n")
+            for label in sorted(by_label):
+                rows = by_label[label]
+                for i in range(0, len(rows), batch):
+                    fh.write(f"UNWIND {_cy_rows(rows[i:i + batch])} AS row "
+                             f"MERGE (n:{label} {{id: row.id}}) SET n += row.props;\n")
+            for (la, rel, lb) in sorted(by_rel):
+                rows = by_rel[(la, rel, lb)]
+                for i in range(0, len(rows), batch):
+                    fh.write(f"UNWIND {_cy_rows(rows[i:i + batch])} AS row "
+                             f"MATCH (a:{la} {{id: row.a}}), (b:{lb} {{id: row.b}}) "
+                             f"MERGE (a)-[:{rel}]->(b);\n")
+        return cy
+
+
+def _cy_label(ntype: str) -> str:
+    return re.sub(r"[^A-Za-z0-9_]", "_", ntype or "Node") or "Node"
+
+
+def _cy_rows(rows: list[dict]) -> str:
+    def lit(v: Any) -> str:
+        if isinstance(v, dict):
+            return "{" + ", ".join(f"{k}: {lit(x)}" for k, x in v.items()) + "}"
+        if isinstance(v, (list, tuple)):
+            return "[" + ", ".join(lit(x) for x in v) + "]"
+        return _cy_value(v)
+    return lit(rows)
 
 
 def _cy_value(v: Any) -> str:

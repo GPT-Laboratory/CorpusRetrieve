@@ -13,7 +13,8 @@ Served at `/` from the same origin as the API. Disable it with
 | Anthropic API key | Sent as `X-Anthropic-API-Key` for this request only |
 | Anthropic model | Overrides `DEFAULT_VLM_MODEL` |
 | Corpus metadata | JSON object attached to the whole corpus |
-| Per-document configuration | JSON object keyed by filename or archive path |
+| Per-document configuration | JSON object keyed by filename or archive path; includes bibliographic records and a JSON file picker |
+| Require resolvable publication metadata | Reject unresolved/ambiguous publication records from release-ready bundles |
 
 The key field has a show/hide toggle and is cleared after submission. The hint
 beneath it reports whether a service key is already configured, so it is clear
@@ -46,16 +47,35 @@ The centre panel has four views:
 |---|---|
 | Source | The rendered page with bounding boxes over every element |
 | Chunks | A typed span map; width is token count, colour is chunk type |
-| Graph | An interactive knowledge graph with a type legend and PNG export |
+| Graph | The selected document's knowledge graph, with a type legend, edge kinds, and PNG export |
 | Embedding | Vectors projected into 2D; nearby points are semantically similar |
 
 The source view needs page previews, which are rendered for PDF documents when
 `EMIT_PAGE_PREVIEWS` is true. Other formats have no page geometry to draw on,
 and the view says so rather than failing.
 
-The graph hides `VectorPoint`, `Quantity`, `Unit`, and `TableKV` by default so
-document structure is visible rather than index plumbing. Legend entries toggle
-types back on.
+The graph shows one document at a time: the paper in the centre, its sections
+on the first ring, and their units (text, claims, figures, tables, references)
+further out, laid out the same way every time. Edges are coloured by kind:
+outline, evidence, citation, values, vector. `VectorPoint`, `Quantity`, `Unit`
+and `TableKV` start hidden; every type is in the legend with its count, and a
+click shows or hides it. Selecting a chunk highlights its node and neighbours.
+The whole-corpus graph is too large to draw in a browser for big builds; the
+caption gives its totals, and the JSON, GraphML and Cypher downloads load it
+into Gephi or Neo4j.
+
+## Finished, failed and earlier jobs
+
+When a job finishes, the status bar shows a download button for the bundle with
+its size. A job that fails its quality gate, or fails partway, still shows every
+output it produced, with a "not release-ready" notice listing each reason. The
+job ID is kept in the address (`#job/<id>`), so reloading reopens it, and the
+start page lists previous jobs and opens any job by ID. With
+`STORAGE_BACKEND=local` this works after a server restart too.
+
+Before an upload, the configuration panel warns when Tesseract or a requested
+OCR language is missing and when results are held only in memory. "Accept a
+build that is not release-ready" sends `allow_degraded=true`.
 
 ### Explain
 
@@ -94,3 +114,18 @@ file from `index.html`, and drop `vendor/babel.min.js`. No other file changes.
 Reads go to `/console` for browser-specific view models. Uploads and every
 download go directly to `/v1`, so a download URL copied from the interface is a
 valid API URL.
+
+## Workflow for external group data
+
+Prepare a `*.direct_config.json` file for direct document selection, or a
+`*.path_config.json` file for a ZIP upload with relative file paths. Use the
+**Per-document configuration** picker and check the matching preview. The
+**Corpus metadata** field does not populate publication fields on each chunk.
+The browser can upload a batch but does not automatically merge separate jobs
+into one index. Use the CLI for a single persistent group index.
+
+In protected production deployments, the browser UI does not automatically
+send an `API_KEYS` bearer token; deploy behind a properly configured proxy
+or use an authorized API client with `CONSOLE_ENABLED=false`.
+
+See [Generic manifest workflows](MANIFEST_WORKFLOWS.md).

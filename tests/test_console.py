@@ -44,16 +44,40 @@ def test_element_view_supports_page_and_kind_filters(client, completed_job):
     assert filtered["count"] <= everything["count"]
 
 
-def test_graph_view_hides_bookkeeping_nodes_by_default(client, completed_job):
-    payload = client.get(f"/console/jobs/{completed_job}/graph").json()
-    assert "VectorPoint" in payload["hidden_types"]
-    assert all(node["type"] != "VectorPoint" for node in payload["nodes"])
-    assert payload["n_nodes"] == len(payload["nodes"])
+def test_graph_view_draws_one_document_with_a_stable_layout(client, completed_job):
+    documents = client.get(f"/console/jobs/{completed_job}/documents").json()["documents"]
+    doc_id = documents[0]["doc_id"]
+    first = client.get(f"/console/jobs/{completed_job}/graph", params={"doc_id": doc_id}).json()
+    again = client.get(f"/console/jobs/{completed_job}/graph", params={"doc_id": doc_id}).json()
+    assert first["doc_id"] == doc_id
+    assert first["n_nodes"] == len(first["nodes"]) and first["nodes"]
+    assert [(n["x"], n["y"]) for n in first["nodes"]] == [(n["x"], n["y"]) for n in again["nodes"]]
+    paper = next(n for n in first["nodes"] if n["type"] == "Paper")
+    assert (paper["x"], paper["y"]) == (0.0, 0.0) and paper["depth"] == 0
+    # every node id belongs to this document or is a shared unit/vector node
+    ids = {n["id"] for n in first["nodes"]}
+    assert all(e["source"] in ids and e["target"] in ids for e in first["edges"])
+    # chunk nodes carry their chunk id so the workbench can highlight them
+    chunk_ids = {n["chunk_id"] for n in first["nodes"] if n["chunk_id"]}
+    chunks = client.get(f"/console/jobs/{completed_job}/documents/{doc_id}/chunks").json()
+    assert chunk_ids and chunk_ids <= {c["chunk_id"] for c in chunks["chunks"]}
+    # labels are readable text, never a bare hash
+    for node in first["nodes"]:
+        if node["type"] == "Chunk":
+            assert " " in node["label"] or len(node["label"]) < 12
+    assert "VectorPoint" in first["default_hidden"]
+    assert first["corpus"]["nodes"] >= first["total_nodes"]
 
-    unfiltered = client.get(
-        f"/console/jobs/{completed_job}/graph", params={"hide": ""}
-    ).json()
-    assert unfiltered["n_nodes"] >= payload["n_nodes"]
+
+def test_graph_view_rejects_an_unknown_document(client, completed_job):
+    response = client.get(f"/console/jobs/{completed_job}/graph", params={"doc_id": "nope"})
+    assert response.status_code == 404
+
+
+def test_recent_jobs_are_listed_for_reopening(client, completed_job):
+    jobs = client.get("/console/jobs").json()["jobs"]
+    entry = next(job for job in jobs if job["job_id"] == completed_job)
+    assert entry["state"] == "completed" and entry["artifacts_available"] is True
 
 
 def test_projection_returns_normalized_coordinates(client, completed_job):
@@ -69,9 +93,15 @@ def test_artifacts_are_grouped_for_the_download_panel(client, completed_job):
     names = [group["name"] for group in payload["artifact_groups"]]
     assert "Index" in names and "Knowledge graph" in names
     assert payload["bundle"] == f"/v1/jobs/{completed_job}/bundle"
+    assert payload["bundle_size_bytes"] > 0
     for group in payload["artifact_groups"]:
+        assert group["count"] >= len(group["items"])
         for item in group["items"]:
             assert item["download"].startswith("/v1/jobs/")
+    # the corpus-level files the download panel features are listed in full
+    paths = {item["path"] for item in payload["artifacts"]}
+    assert {"index/vectors.jsonl", "manifest.json"} <= paths
+    assert not any(path.startswith("documents/") for path in paths)
 
 
 @pytest.mark.parametrize("job_id", ["not-a-job", "0" * 24])

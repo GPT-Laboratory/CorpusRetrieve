@@ -19,4 +19,8 @@ def get_artifact_store() -> ArtifactStore:
         from corpusretrieve.storage.s3 import S3ArtifactStore
 
         return S3ArtifactStore(settings)
+    if settings.storage_backend == "local":
+        from corpusretrieve.storage.local import LocalArtifactStore
+
+        return LocalArtifactStore(settings)
     return MemoryArtifactStore()

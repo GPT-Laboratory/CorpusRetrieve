@@ -18,8 +18,10 @@ from collections import Counter
 from statistics import median
 
 from docparse.models import Element, ExtractionConfig, ExtractionResult
+from docparse.ocr import ocr_status, usable_langs
 from docparse.router import register
 from docparse.serialize import serialize_table
+from docparse.text import garbled_ratio
 
 try:
     import fitz  # PyMuPDF
@@ -39,6 +41,19 @@ def _norm_boiler(text: str) -> str:
     """Normalize a block for repetition matching: page numbers vary, the rest doesn't."""
     t = re.sub(r"\d+", "#", text.strip().lower())
     return re.sub(r"\s+", " ", t)
+
+
+def _caption_distance(caption_bbox, target_bbox) -> float:
+    """Vertical gap, but only between boxes that share a column.
+
+    The vertical gap alone is not enough: in two-column layouts a caption could
+    attach to a figure in the other column that happened to be closer.
+    """
+    overlap = min(caption_bbox[2], target_bbox[2]) - max(caption_bbox[0], target_bbox[0])
+    narrower = max(1.0, min(caption_bbox[2] - caption_bbox[0], target_bbox[2] - target_bbox[0]))
+    if overlap < 0.2 * narrower:
+        return 1e9
+    return _vertical_gap(caption_bbox, target_bbox)
 
 
 def _vertical_gap(caption_bbox, target_bbox) -> float:
@@ -83,6 +98,24 @@ def _xy_cut(items: list[tuple[list[float], object]], min_gap: float = 14.0) -> l
             if lo_items and hi_items:
                 return _xy_cut(lo_items, min_gap) + _xy_cut(hi_items, min_gap)
     return [p for _, p in sorted(items, key=lambda it: (round(it[0][1] / 3), it[0][0]))]
+
+
+def _weighted_median(pairs: list[tuple[float, int]]) -> float:
+    """Median font size weighted by characters: the size most TEXT is set in.
+
+    An unweighted median over spans lets a page with as many heading lines as
+    body lines report a heading size as the body size.
+    """
+    pairs = sorted((s, w) for s, w in pairs if w > 0)
+    total = sum(w for _, w in pairs)
+    if not total:
+        return 0.0
+    acc = 0
+    for size, weight in pairs:
+        acc += weight
+        if acc * 2 >= total:
+            return size
+    return pairs[-1][0]
 
 
 def _heading_levels(all_sizes: list[float], med: float, ratio: float) -> dict[float, int]:
@@ -216,6 +249,33 @@ def _caption_anchored_tables(page, cfg, existing_boxes):
             out.append((rows, bbox or list(t.bbox)))
     return out
 
+def _credible_table(rows: list[list], bbox, page_width: float,
+                    in_references: bool = False) -> bool:
+    """Conservative table-quality filter: refuse prose grids and reference lists.
+
+    The PDF text still survives as narrative when a candidate is rejected.
+    This avoids turning scientific discussion into bogus table key/value facts.
+    """
+    if not rows or len(rows) < 2:
+        return False
+    cells = [str(v or "").strip() for row in rows for v in row if v is not None]
+    if not cells:
+        return False
+    sample = " ".join(cells)
+    if in_references and not re.search(r"^\s*(?:Table|Taulukko|Tabell)\s*\d", sample, re.I):
+        return False
+    if re.search(r"\b(?:Discussion|References|Acknowledgements)\b", sample[:120], re.I) \
+            and sum(bool(re.search(r"\d", c)) for c in cells) < 3:
+        return False
+    numeric = sum(bool(re.search(r"\d", c)) for c in cells)
+    # Text-strategy methods can shred regular paragraphs into many columns.
+    if numeric < 2 and len(cells) >= 10:
+        return False
+    if max((len(c) for c in cells), default=0) > 600:
+        return False
+    return True
+
+
 # --------------------------------------------------------------------------- OCR
 
 def _preprocess(img, cfg: ExtractionConfig):
@@ -231,6 +291,9 @@ def _auto_orient(img, result: ExtractionResult, cfg: ExtractionConfig):
         return img
     try:
         import pytesseract
+
+        from docparse.ocr import configure_pytesseract
+        configure_pytesseract()
         osd = pytesseract.image_to_osd(img)
         m = re.search(r"Rotate:\s*(\d+)", osd)
         rot = int(m.group(1)) if m else 0
@@ -245,20 +308,41 @@ def _auto_orient(img, result: ExtractionResult, cfg: ExtractionConfig):
 
 
 def _ocr_lines(png_bytes: bytes, cfg: ExtractionConfig, result: ExtractionResult,
-               scale: float) -> list[tuple[str, float | None, list[float]]]:
-    """OCR a page raster -> [(line_text, confidence, bbox_in_source_coords)]."""
+               scale: float) -> list[tuple[str, float | None, list[float]]] | None:
+    """OCR a page raster -> [(line_text, confidence, bbox_in_source_coords)].
+
+    Returns ``None`` when OCR could not run at all (no binary, no language
+    data, engine error) so callers can count the page as an OCR failure; an
+    empty list means OCR ran and found no text.
+    """
+    status = ocr_status(cfg.ocr_langs)
+    langs = usable_langs(cfg.ocr_langs)
+    stats = result.stats
+    if not status["binary"] or langs is None:
+        stats["ocr_failed_pages"] = stats.get("ocr_failed_pages", 0) + 1
+        msg = ("OCR unavailable: Tesseract not found (install it, or set TESSERACT_CMD "
+               "to tesseract.exe)" if not status["binary"]
+               else f"OCR unavailable: no traineddata for {cfg.ocr_langs}")
+        if msg not in result.warnings:
+            result.warnings.append(msg)
+        return None
+    if status["missing"]:
+        stats["ocr_degraded_pages"] = stats.get("ocr_degraded_pages", 0) + 1
+        stats["ocr_missing_langs"] = status["missing"]
+        msg = f"OCR language data missing: {'+'.join(status['missing'])}"
+        if msg not in result.warnings:
+            result.warnings.append(msg)
     try:
         import pytesseract
         from PIL import Image
+
+        from docparse.ocr import configure_pytesseract
+        configure_pytesseract()
         img = Image.open(io.BytesIO(png_bytes))
         img = _auto_orient(img, result, cfg)
         img = _preprocess(img, cfg)
-        try:
-            data = pytesseract.image_to_data(img, lang=cfg.ocr_langs,
-                                             output_type=pytesseract.Output.DICT)
-        except Exception:
-            data = pytesseract.image_to_data(img, lang="eng",
-                                             output_type=pytesseract.Output.DICT)
+        data = pytesseract.image_to_data(img, lang=langs,
+                                         output_type=pytesseract.Output.DICT)
         lines: dict[tuple, dict] = {}
         n = len(data.get("text", []))
         for i in range(n):
@@ -287,7 +371,8 @@ def _ocr_lines(png_bytes: bytes, cfg: ExtractionConfig, result: ExtractionResult
         return out
     except Exception as exc:
         result.warnings.append(f"OCR failed: {exc}")
-        return []
+        stats["ocr_failed_pages"] = stats.get("ocr_failed_pages", 0) + 1
+        return None
 
 
 # --------------------------------------------------------------------------- PyMuPDF
@@ -326,22 +411,92 @@ def _pymupdf_extract(path: str, cfg: ExtractionConfig, result: ExtractionResult)
     boiler = _collect_boilerplate(doc, cfg)
     result.stats["boilerplate_patterns"] = len(boiler)
     scale = 72.0 / cfg.image_dpi  # raster px -> PDF points
+    n_pages = doc.page_count if cfg.max_pages is None else min(doc.page_count, cfg.max_pages)
+    source_counts = {}
+    for n in range(n_pages):
+        source_counts[str(n + 1)] = len(doc[n].get_text("text").strip())
+    result.stats["source_page_chars"] = source_counts
+    if n_pages:
+        front = " ".join(doc[i].get_text("text") for i in range(min(n_pages, 2)))
+        if hit := re.search(r"\b10\.\d{4,9}/[-._;()/:a-zA-Z0-9]+\b", front):
+            result.stats["source_doi"] = hit.group(0).rstrip(".,;")
+        # Text-extraction order is unreliable on publisher front pages; use
+        # geometry and font size rather than the first large heading (journal banner).
+        title_candidates = []
+        p0 = doc[0]
+        for block in p0.get_text("dict").get("blocks", []):
+            if block.get("type") != 0:
+                continue
+            y = block["bbox"][1]
+            if not p0.rect.height * 0.12 <= y <= p0.rect.height * 0.44:
+                continue
+            spans = [sp for line in block.get("lines", []) for sp in line.get("spans", [])]
+            text = " ".join("".join(sp.get("text", "") for sp in line.get("spans", []))
+                            for line in block.get("lines", [])).strip()
+            if (spans and 24 <= len(text) <= 240 and len(text.split()) >= 5
+                    and max(sp.get("size", 0) for sp in spans) >= 11
+                    and not re.search(r"journal homepage|contents lists|\buniversity\b|\babstract\b", text, re.I)):
+                title_candidates.append((y, text))
+        if title_candidates:
+            result.stats["source_title"] = sorted(title_candidates)[0][1]
+
+    # --- document-level pre-pass -------------------------------------------
+    # Heading levels come from font sizes clustered over the WHOLE document
+    # (clustering per page would make the same size level 1 on one page
+    # and level 3 on the next), and images are counted across pages so that
+    # logos and banners repeated on many pages are not treated as figures.
+    page_dicts = []
+    doc_sizes: list[float] = []
+    doc_weighted: list[tuple[float, int]] = []
+    xref_pages: Counter[int] = Counter()
+    for pno in range(n_pages):
+        pd_ = doc[pno].get_text("dict")
+        page_dicts.append(pd_)
+        for b in pd_["blocks"]:
+            if b.get("type") != 0:
+                continue
+            for ln in b.get("lines", []):
+                for sp in ln.get("spans", []):
+                    doc_sizes.append(sp["size"])
+                    doc_weighted.append((round(sp["size"], 1), len(sp.get("text", "").strip())))
+        try:
+            xref_pages.update({img[0] for img in doc[pno].get_images(full=True)})
+        except Exception:
+            pass
+    doc_med = _weighted_median(doc_weighted) if doc_weighted else 0.0
+    doc_levels = _heading_levels(doc_sizes, doc_med, cfg.heading_size_ratio)
+    repeat_floor = max(cfg.repeated_image_min_pages,
+                       int(n_pages * cfg.repeated_image_min_ratio + 0.999))
+    repeated_xrefs = {x for x, c in xref_pages.items() if c >= repeat_floor}
+    if repeated_xrefs:
+        result.stats["repeated_images"] = len(repeated_xrefs)
 
     # per-page dimensions (PDF points, top-left origin) so a UI overlay can
     # scale element bboxes onto a rendered page image without guessing.
     result.stats["page_dims"] = {
         str(p + 1): {"width": doc[p].rect.width, "height": doc[p].rect.height,
-                     "unit": "pt", "origin": "top-left"}
+                     "unit": "pt", "origin": "top-left", "rotation": doc[p].rotation}
         for p in range(doc.page_count)}
 
-    n_pages = doc.page_count if cfg.max_pages is None else min(doc.page_count, cfg.max_pages)
+    seen_references = False
     for pno in range(n_pages):
         page = doc[pno]
-        pd = page.get_text("dict")
+        pd = page_dicts[pno]
         raw_text = page.get_text("text")
+        if re.search(r"(?:^|\n)\s*(?:Appendix|Liite|Bilaga)\s+[A-Z0-9]", raw_text, re.I):
+            seen_references = False
+        if re.search(r"(?:^|\n)\s*(?:References|Bibliography|Lähteet|Referenser)\s*(?:\n|$)", raw_text, re.I):
+            seen_references = True
         page_h = page.rect.height
 
         is_scanned = len(raw_text.strip()) < cfg.ocr_min_chars
+        # a text layer that is mostly undecodable glyphs (broken font
+        # encodings) is as good as no text layer: read the page with OCR
+        page_garbled = (not is_scanned
+                        and garbled_ratio(raw_text) > cfg.garbled_text_threshold)
+        if page_garbled:
+            result.stats["garbled_pages"] = result.stats.get("garbled_pages", 0) + 1
+            is_scanned = True
         do_ocr = cfg.ocr == "on" or (cfg.ocr == "auto" and is_scanned)
 
         # --- figure-dominant page detection (schematics / maps / drawings) ---
@@ -380,6 +535,8 @@ def _pymupdf_extract(path: str, cfg: ExtractionConfig, result: ExtractionResult)
             try:
                 for ti, t in enumerate(page.find_tables().tables):
                     rows = t.extract()
+                    if not _credible_table(rows, t.bbox, page.rect.width, seen_references):
+                        continue
                     text, extras, structured, trunc = serialize_table(
                         rows, cfg.table_serializations, cfg.table_max_rows)
                     if not structured.get("rows"):
@@ -403,13 +560,18 @@ def _pymupdf_extract(path: str, cfg: ExtractionConfig, result: ExtractionResult)
                     if assets:
                         try:
                             crop = page.get_pixmap(clip=fitz.Rect(bbox), dpi=cfg.image_dpi)
-                            fp = os.path.join(assets, f"p{pno + 1}_table{ti}.png")
+                            # numbered by KEPT tables, shared with the caption-anchored
+                            # path below, so two crops can never share a file name
+                            fp = os.path.join(assets, f"p{pno + 1}_table{len(table_els)}.png")
                             crop.save(fp)
                             visual["image_path"] = fp
                         except Exception:
                             pass
                     meta = {"rows": getattr(t, "row_count", None),
                             "cols": getattr(t, "col_count", None), "truncated": trunc}
+                    if bbox[3] - bbox[1] < 50 and len(rows) < 7:
+                        meta["table_quality_warning"] = "small_fragment_review_structure"
+                        result.stats["uncertain_tables"] = result.stats.get("uncertain_tables", 0) + 1
                     if extras:
                         meta["serializations"] = extras
                     table_els.append(Element(
@@ -420,6 +582,8 @@ def _pymupdf_extract(path: str, cfg: ExtractionConfig, result: ExtractionResult)
                 result.warnings.append(f"table extraction failed on page {pno + 1}: {exc}")
             if cfg.table_fallback == "text":
                 for rows, bbox in _caption_anchored_tables(page, cfg, table_boxes):
+                    if not _credible_table(rows, bbox, page.rect.width, seen_references):
+                        continue
                     table_boxes.append(bbox)
                     text, extras, structured, trunc = serialize_table(
                         rows, cfg.table_serializations, cfg.table_max_rows)
@@ -442,15 +606,14 @@ def _pymupdf_extract(path: str, cfg: ExtractionConfig, result: ExtractionResult)
                         visual_ref=visual, metadata=meta))
 
         # --- text blocks (skip table interiors and boilerplate) ---
-        sizes = [s["size"] for b in pd["blocks"] if b.get("type") == 0
-                 for ln in b.get("lines", []) for s in ln.get("spans", [])]
-        med = median(sizes) if sizes else 0.0
-        levels = _heading_levels(sizes, med, cfg.heading_size_ratio)
+        med, levels = doc_med, doc_levels
 
         text_els: list[Element] = []
         for b in pd["blocks"]:
             if b.get("type") != 0:
                 continue
+            if page_garbled and do_ocr and ocr_status(cfg.ocr_langs)["binary"]:
+                continue                  # OCR below replaces the undecodable layer
             bbox = list(b["bbox"])
             if any(_center_in(bbox, tb) for tb in table_boxes):
                 continue
@@ -495,21 +658,25 @@ def _pymupdf_extract(path: str, cfg: ExtractionConfig, result: ExtractionResult)
                     rects = page.get_image_rects(xref)
                 except Exception:
                     rects = []
-                for r in rects:
+                for ri, r in enumerate(rects):
                     if (r.x1 - r.x0) * (r.y1 - r.y0) < 2500:  # skip tiny logos/rules
                         continue
                     bbox = [r.x0, r.y0, r.x1, r.y1]
                     visual = {"page": pno + 1, "bbox": bbox, "xref": xref}
+                    meta = {"repeated_image": True} if xref in repeated_xrefs else {}
                     if assets:
                         try:
                             crop = page.get_pixmap(clip=r, dpi=cfg.image_dpi)
-                            fp = os.path.join(assets, f"p{pno + 1}_fig{xref}.png")
+                            # one file per placement: the same image placed twice on
+                            # a page no longer overwrites its own crop
+                            fp = os.path.join(assets, f"p{pno + 1}_fig{xref}_{ri}.png")
                             crop.save(fp)
                             visual["image_path"] = fp
                         except Exception:
                             pass
                     fig_els.append(Element(kind="figure", text="", page=pno + 1, bbox=bbox,
-                                           extractor="pymupdf", visual_ref=visual))
+                                           extractor="pymupdf", visual_ref=visual,
+                                           metadata=meta))
 
         # --- vector figures: charts/maps/diagrams drawn as paths, not raster images ---
         if page_is_figure and page_fig_bbox is not None:
@@ -585,7 +752,7 @@ def _pymupdf_extract(path: str, cfg: ExtractionConfig, result: ExtractionResult)
                     continue
                 best, bestd = None, cfg.caption_max_gap
                 for tgt in targets:
-                    d = _vertical_gap(el.bbox, tgt.bbox)
+                    d = _caption_distance(el.bbox, tgt.bbox)
                     if d < bestd:
                         best, bestd = tgt, d
                 if best is not None:
@@ -601,7 +768,7 @@ def _pymupdf_extract(path: str, cfg: ExtractionConfig, result: ExtractionResult)
                 with open(img_path, "wb") as fh:
                     fh.write(png)
             if do_ocr:
-                lines = _ocr_lines(png, cfg, result, scale)
+                lines = _ocr_lines(png, cfg, result, scale) or []
                 if cfg.ocr_line_elements:
                     for text, conf, bbox in lines:
                         order += 1
@@ -714,7 +881,7 @@ def _pdfplumber_extract(path: str, cfg: ExtractionConfig, result: ExtractionResu
                         continue
                     best, bestd = None, cfg.caption_max_gap
                     for tgt in table_els:
-                        d = _vertical_gap(el.bbox, tgt.bbox)
+                        d = _caption_distance(el.bbox, tgt.bbox)
                         if d < bestd:
                             best, bestd = tgt, d
                     if best is not None:

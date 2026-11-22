@@ -12,6 +12,9 @@ os.environ.setdefault("STORAGE_BACKEND", "memory")
 os.environ.setdefault("JOB_MODE", "inline")
 os.environ.setdefault("DEFAULT_EMBEDDER", "hash")
 os.environ.setdefault("EMIT_PAGE_PREVIEWS", "true")
+# the CI image ships English traineddata only; tests that need other
+# languages request them explicitly
+os.environ.setdefault("OCR_LANGS", "eng")
 os.environ.pop("ANTHROPIC_API_KEY", None)
 
 

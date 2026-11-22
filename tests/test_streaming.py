@@ -93,7 +93,7 @@ def test_failures_are_recorded_not_raised(tmp_path: Path):
     assert entries[0]["stage"] == "extract"
 
 
-def test_unreadable_document_is_skipped_and_the_job_completes(client, tmp_path):
+def _good_and_broken():
     import io
 
     fitz = pytest.importorskip("fitz")
@@ -101,12 +101,16 @@ def test_unreadable_document_is_skipped_and_the_job_completes(client, tmp_path):
     document.new_page().insert_text((72, 90), "Readable report", fontsize=12)
     good = document.tobytes()
     document.close()
-
-    files = [
+    return [
         ("files", ("good.pdf", io.BytesIO(good), "application/pdf")),
         ("files", ("broken.pdf", io.BytesIO(b"%PDF-1.4 not a pdf"), "application/pdf")),
     ]
-    job_id = client.post("/v1/jobs", files=files).json()["job_id"]
+
+
+def test_unreadable_document_is_skipped_and_the_job_completes(client, tmp_path):
+    # a skipped document makes the build degraded; accepting it is explicit
+    job_id = client.post("/v1/jobs", files=_good_and_broken(),
+                         data={"allow_degraded": "true"}).json()["job_id"]
 
     status = client.get(f"/v1/jobs/{job_id}").json()
     assert status["state"] == "completed"
@@ -116,6 +120,22 @@ def test_unreadable_document_is_skipped_and_the_job_completes(client, tmp_path):
     assert manifest["complete"] is True
     assert len(manifest["documents"]) == 1
     assert manifest["skipped_documents"][0]["filename"] == "broken.pdf"
+    assert manifest["release_ready"] is False
+    assert "skipped_documents=1" in manifest["quality"]["reasons"]
+
+
+def test_degraded_build_fails_loudly_but_keeps_every_artifact(client):
+    """L2 regression: degradation used to pass the build silently."""
+    job_id = client.post("/v1/jobs", files=_good_and_broken()).json()["job_id"]
+
+    status = client.get(f"/v1/jobs/{job_id}").json()
+    assert status["state"] == "failed"
+    assert status["error"].startswith("QualityGateFailed")
+    assert "skipped_documents=1" in status["error"]
+    # nothing is thrown away
+    assert client.get(f"/v1/jobs/{job_id}/bundle").status_code == 200
+    manifest = client.get(f"/v1/jobs/{job_id}/manifest").json()
+    assert manifest["complete"] is True and manifest["release_ready"] is False
 
 
 def test_a_corpus_of_only_unreadable_documents_fails(client):
@@ -138,10 +158,13 @@ def test_partial_artifacts_survive_a_fatal_stage_failure(client, monkeypatch):
     import corpusretrieve.pipeline.processor as processor
 
     fitz = pytest.importorskip("fitz")
-    document = fitz.open()
-    document.new_page().insert_text((72, 90), "Recoverable report", fontsize=12)
-    body = document.tobytes()
-    document.close()
+    def body(n: int) -> bytes:
+        # distinct documents: identical bytes are deduplicated
+        document = fitz.open()
+        document.new_page().insert_text((72, 90), f"Recoverable report {n}", fontsize=12)
+        data = document.tobytes()
+        document.close()
+        return data
 
     def explode(*args, **kwargs):
         raise MemoryError("simulated failure while embedding")
@@ -149,7 +172,7 @@ def test_partial_artifacts_survive_a_fatal_stage_failure(client, monkeypatch):
     monkeypatch.setattr(processor, "build_index", explode)
 
     files = [
-        ("files", (f"doc{n}.pdf", io.BytesIO(body), "application/pdf")) for n in range(3)
+        ("files", (f"doc{n}.pdf", io.BytesIO(body(n)), "application/pdf")) for n in range(3)
     ]
     job_id = client.post("/v1/jobs", files=files).json()["job_id"]
 

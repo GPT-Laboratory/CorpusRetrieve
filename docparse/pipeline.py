@@ -1,6 +1,7 @@
 """Dispatch layer: turn a path (file, directory, or archive) into ExtractionResult(s)."""
 from __future__ import annotations
 
+import hashlib
 import os
 import tempfile
 import zipfile
@@ -29,11 +30,31 @@ def extract(path: str, config: ExtractionConfig | None = None) -> ExtractionResu
             return r
     result = extractor.extract(path, cfg)
     result.mime = result.mime or mime
+    # content address of the source: the seed for deterministic element IDs
+    digest = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for block in iter(lambda: fh.read(1024 * 1024), b""):
+            digest.update(block)
+    result.stats["source_sha256"] = digest.hexdigest()
     if cfg.scientific:
         scientific.clean(result, cfg)
     finalize(result, cfg)
     if cfg.scientific:
         scientific.annotate(result, cfg)
+    source_counts = result.stats.get("source_page_chars") or {}
+    uncovered = []
+    for page, source_chars in source_counts.items():
+        if source_chars < 500:
+            continue
+        extracted_chars = sum(len(e.text or "") for e in result.elements
+                              if e.page == int(page) and e.kind != "page_image")
+        if extracted_chars < source_chars * 0.2:
+            uncovered.append(int(page))
+    result.stats["low_text_coverage_pages"] = len(uncovered)
+    if uncovered:
+        result.stats["low_text_coverage_page_numbers"] = uncovered
+        result.warnings.append("Text coverage <20% on page(s): " +
+                               ", ".join(map(str, uncovered)))
     return result
 
 

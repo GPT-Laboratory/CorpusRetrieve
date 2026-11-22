@@ -40,3 +40,8 @@ class MemoryJobStore:
         with self._lock:
             self._specs.pop(job_id, None)
             self._states.pop(job_id, None)
+
+    def list_states(self, limit: int = 50) -> list[JobState]:
+        with self._lock:
+            states = list(self._states.values())
+        return sorted(states, key=lambda s: s.created_at, reverse=True)[:limit]

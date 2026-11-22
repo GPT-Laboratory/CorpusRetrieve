@@ -41,15 +41,19 @@ class CorpusProcessor:
         sink: ProgressSink,
         options: DocumentOptions | None = None,
         batch_size: int = DEFAULT_BATCH_SIZE,
+        inline_vectors: bool = True,
     ) -> None:
         self.tracker = StageTracker(sink)
         self.options = options or DocumentOptions()
         self.batch_size = batch_size
+        self.inline_vectors = inline_vectors
         self.registry: CorpusRegistry | None = None
+        self.document_processor: DocumentProcessor | None = None
 
     def run(
         self, spec: JobSpec, input_paths: list[Path], output_dir: Path
     ) -> dict[str, Any]:
+        _check_embedder(spec.embedder)
         registry = self._run_document_stages(spec, input_paths, output_dir)
         if not len(registry):
             raise NoDocumentsProcessed(
@@ -70,6 +74,7 @@ class CorpusProcessor:
         processor = DocumentProcessor(spec, self.options, output_dir)
         registry = CorpusRegistry(output_dir)
         self.registry = registry
+        self.document_processor = processor
         total = max(len(input_paths), 1)
 
         self.tracker.start(*DOCUMENT_STAGES)
@@ -79,7 +84,9 @@ class CorpusProcessor:
             zip(spec.files, input_paths, strict=True), start=1
         ):
             try:
-                registry.add(processor.process(item, path))
+                record = processor.process(item, path)
+                if record is not None:
+                    registry.add(record)
             except Exception as exc:  # noqa: BLE001 - one bad file must not end the job
                 logger.warning("Skipping %s: %s", item.filename, exc)
                 registry.fail(
@@ -96,8 +103,17 @@ class CorpusProcessor:
                 stage="extract",
             )
 
+        registry.duplicates = processor.duplicates
+        _prune_stale_documents(output_dir, {r.doc_id for r in registry.records})
         self._sync_document_detail(processor, spec, registry)
         self.tracker.finish(*DOCUMENT_STAGES)
+        # the three stages share one loop: report each stage's own time, and
+        # the loop's wall-clock time as detail
+        wall_ms = next(r["elapsed_ms"] for r in self.tracker.snapshot()
+                       if r["name"] == DOCUMENT_STAGES[0])
+        for name in DOCUMENT_STAGES:
+            self.tracker.set_elapsed(name, processor.stats.stage_ms.get(name, 0))
+            self.tracker.update(name, loop_wall_ms=wall_ms)
         self.tracker.report(
             DOCUMENT_PROGRESS_CEILING,
             f"{len(registry)} documents processed, {len(registry.failures)} skipped",
@@ -113,6 +129,11 @@ class CorpusProcessor:
             "extract", **stats.extract_detail(), skipped=len(registry.failures)
         )
         self.tracker.update("enrich", **stats.enrich_detail(spec.enable_vlm))
+        if spec.enable_vlm:
+            status = processor.vlm_status()
+            self.tracker.update("enrich", vlm_calls=status["calls"],
+                                vlm_stopped=status["stopped"],
+                                vlm_stopped_reason=status["stopped_reason"])
         self.tracker.update("chunk", **stats.chunk_detail())
 
     def _run_stage_index(
@@ -127,7 +148,8 @@ class CorpusProcessor:
                 self.tracker.report(60, f"Embedded {done} chunks", stage="embed")
 
         summary = build_index(
-            registry, output_dir, spec, batch_size=self.batch_size, on_progress=report
+            registry, output_dir, spec, batch_size=self.batch_size, on_progress=report,
+            inline_vectors=self.inline_vectors,
         )
         self.tracker.update(
             "embed",
@@ -189,6 +211,8 @@ class CorpusProcessor:
             graph_summary,
             stage_summary,
             output_dir,
+            vlm_status=(self.document_processor.vlm_status()
+                        if self.document_processor is not None and spec.enable_vlm else None),
         )
         self.tracker.update("package", artifacts=len(result["artifacts"]))
         self.tracker.finish("package")
@@ -200,3 +224,45 @@ class CorpusProcessor:
 
     def failures(self) -> list[dict[str, Any]]:
         return self.registry.failure_entries() if self.registry else []
+
+
+def _prune_stale_documents(output_dir: Path, keep: set[str]) -> list[str]:
+    """Remove document folders a previous run left behind.
+
+    A resumable build reuses the output directory, so a file dropped from the
+    collection would otherwise stay in the bundle (and the catalog) forever.
+    """
+    import shutil
+
+    root = output_dir / "documents"
+    removed: list[str] = []
+    if not root.is_dir():
+        return removed
+    for child in root.iterdir():
+        if child.is_dir() and child.name not in keep:
+            shutil.rmtree(child)
+            removed.append(child.name)
+    return removed
+
+
+class EmbedderUnavailable(RuntimeError):
+    """The requested embedding model cannot be loaded on this machine."""
+
+
+def _check_embedder(spec: str) -> None:
+    """Load a model-based embedder before extraction, not after it.
+
+    Extraction can take hours; a misspelt model id or a missing download
+    should stop the job at the start. Hashing embedders need no check, and
+    ``auto`` falls back by design.
+    """
+    if spec in {"hash", "hash-v2", "auto"}:
+        return
+    from docparse.vectorization.embedding import resolve_embedder
+
+    try:
+        resolve_embedder(spec)
+    except Exception as exc:  # noqa: BLE001 - reported with the model name
+        raise EmbedderUnavailable(
+            f"Embedder {spec!r} could not be loaded before processing started: "
+            f"{type(exc).__name__}: {exc}") from exc

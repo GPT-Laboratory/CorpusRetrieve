@@ -120,12 +120,14 @@ function Pill({ type }) {
 
 /* ------------------------------------------------------------------ setup */
 
-function SetupPanel({ settings, onSubmit, busy, error }) {
+function SetupPanel({ settings, onSubmit, busy, error, onOpenJob }) {
   const [files, setFiles] = useState([]);
   const [corpusName, setCorpusName] = useState("corpus");
   const [embedder, setEmbedder] = useState(settings.default_embedder || "hash");
   const [metadata, setMetadata] = useState("{}");
   const [documentConfig, setDocumentConfig] = useState("{}");
+  const [requireBibliographic, setRequireBibliographic] = useState(Boolean(settings.require_bibliographic));
+  const [allowDegraded, setAllowDegraded] = useState(false);
   const [useVlm, setUseVlm] = useState(false);
   const [apiKey, setApiKey] = useState("");
   const [showKey, setShowKey] = useState(false);
@@ -136,6 +138,31 @@ function SetupPanel({ settings, onSubmit, busy, error }) {
   const folderRef = useRef();
 
   const fileLimit = settings.max_files_per_job || 2000;
+  const configPreview = (() => {
+    try {
+      const parsed = JSON.parse(documentConfig || "{}");
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+        return { error: "Document configuration must be a JSON object." };
+      }
+      if (files.length === 1 && files[0].name.toLowerCase().endsWith(".zip")) {
+        return { archive: true, keys: Object.keys(parsed).filter(k => k !== "__collection__").length };
+      }
+      const seen = {};
+      const names = files.map(file => {
+        const index = (seen[file.name] || 0) + 1;
+        seen[file.name] = index;
+        return index === 1 ? file.name : `${file.name}#${index}`;
+      });
+      const keys = Object.keys(parsed).filter(k => k !== "__collection__");
+      const missing = names.filter(name => !Object.prototype.hasOwnProperty.call(parsed, name));
+      const unexpected = keys.filter(name => !names.includes(name));
+      const malformed = keys.filter(name => !parsed[name] || typeof parsed[name] !== "object" ||
+        Array.isArray(parsed[name]) || (parsed[name].metadata != null &&
+        (typeof parsed[name].metadata !== "object" || Array.isArray(parsed[name].metadata))));
+      return { total: names.length, matched: names.length - missing.length,
+               missing, unexpected, malformed, empty: keys.length === 0 };
+    } catch (error) { return { error: error.message }; }
+  })();
 
   const addFiles = (list) => {
     const incoming = Array.from(list || []);
@@ -168,7 +195,7 @@ function SetupPanel({ settings, onSubmit, busy, error }) {
 
   const submit = () =>
     onSubmit({
-      files, corpusName, embedder, metadata, documentConfig,
+      files, corpusName, embedder, metadata, documentConfig, requireBibliographic, allowDegraded,
       useVlm, apiKey: apiKey.trim(), vlmModel: vlmModel.trim(),
       clearKey: () => setApiKey(""),
     });
@@ -235,14 +262,24 @@ function SetupPanel({ settings, onSubmit, busy, error }) {
           <div className="field">
             <label htmlFor="embedder">Embedding model</label>
             <select id="embedder" value={embedder} onChange={(e) => setEmbedder(e.target.value)}>
-              {(settings.embedders || ["hash"]).map((name) => (
-                <option key={name} value={name}>
-                  {name === "hash" ? "Hashing (offline, deterministic)" : name}
+              {(settings.embedders || [{ spec: "hash", label: "Hashing", available: true }]).map((option) => (
+                <option key={option.spec} value={option.spec} disabled={!option.available}>
+                  {option.label}{option.available ? "" : " (not installed)"}
                 </option>
               ))}
             </select>
-            {!(settings.embedders || []).includes("bge-m3") && (
-              <div className="hint">Install the optional embedding dependencies to enable BGE-M3.</div>
+            {(() => {
+              const chosen = (settings.embedders || []).find((option) => option.spec === embedder);
+              if (chosen && chosen.kind === "lexical") {
+                return <div className="hint">Lexical: finds passages that share words with the question, not passages that mean the same thing. A semantic model can be added later with <code>corpusretrieve reindex</code>, without processing the documents again.</div>;
+              }
+              if (chosen && chosen.kind === "semantic") {
+                return <div className="hint">Semantic: the model is downloaded on first use. Without a GPU, embedding a large corpus can take hours.</div>;
+              }
+              return null;
+            })()}
+            {(settings.embedders || []).some((option) => !option.available) && (
+              <div className="hint">Semantic models need <code>pip install -r requirements-embeddings.txt</code>.</div>
             )}
           </div>
 
@@ -286,17 +323,138 @@ function SetupPanel({ settings, onSubmit, busy, error }) {
             <label htmlFor="documentConfig">Per-document configuration (JSON)</label>
             <textarea id="documentConfig" value={documentConfig}
               onChange={(e) => setDocumentConfig(e.target.value)} />
-            <div className="hint">Optional document IDs and metadata keyed by filename or archive path.</div>
+            <div className="hint">This field supplies per-document publication metadata (title, authors, year, DOI, and source links). Generate it from any supported external manifest, or provide it manually. Collection metadata above is separate.</div>
+            <label className="btn" style={{ display: "inline-block", marginTop: 8, cursor: "pointer" }}>
+              Load document_config.json
+              <input type="file" accept=".json,application/json" hidden
+                onChange={async (e) => {
+                  const file = e.target.files && e.target.files[0];
+                  if (file) setDocumentConfig(await file.text());
+                  e.target.value = "";
+                }} />
+            </label>
+            <details style={{ marginTop: 8 }}>
+              <summary>Example for one PDF</summary>
+              <pre className="config-example">{JSON.stringify({
+                "article.pdf": {document_id: "source-123", metadata: {records: [
+                  {title: "Example publication title", year: 2025,
+                   handle_url: "https://repository.example/123"}
+                ]}}
+              }, null, 2)}</pre>
+            </details>
+            {configPreview.error && <div className="hint warn">Invalid configuration: {configPreview.error}</div>}
+            {configPreview.archive && <div className="hint">ZIP archive: {configPreview.keys} configuration keys. Matching is verified after archive expansion on the server; keys should be archive paths or exact filenames.</div>}
+            {!configPreview.archive && !configPreview.error && files.length > 0 && (
+              <div className="hint">
+                {configPreview.matched}/{configPreview.total} selected files matched by exact filename.
+                {configPreview.missing.length > 0 && (
+                  <div className="warn">No config for: {configPreview.missing.slice(0, 5).join(", ")}{configPreview.missing.length > 5 ? " ..." : ""}. PDF DOI fallback may supply an extracted record; strict mode will reject unresolved files.</div>
+                )}
+                {configPreview.unexpected.length > 0 && (
+                  <div className="warn">Config keys not selected: {configPreview.unexpected.slice(0, 5).join(", ")}{configPreview.unexpected.length > 5 ? " ..." : ""}</div>
+                )}
+                {configPreview.malformed.length > 0 && (
+                  <div className="warn">Malformed metadata entries: {configPreview.malformed.slice(0, 5).join(", ")}</div>
+                )}
+              </div>
+            )}
           </div>
+          <div className="switch">
+            <input id="requireBibliographic" type="checkbox" checked={requireBibliographic}
+              onChange={(e) => setRequireBibliographic(e.target.checked)} />
+            <label htmlFor="requireBibliographic">Require resolvable publication metadata (strict provenance)</label>
+          </div>
+          <div className="hint">If no manifest record matches, the extractor attempts a labelled DOI fallback. Ambiguous or missing publication identities keep the release from being marked ready.</div>
+
+          <div className="switch">
+            <input id="allowDegraded" type="checkbox" checked={allowDegraded}
+              onChange={(e) => setAllowDegraded(e.target.checked)} />
+            <label htmlFor="allowDegraded">Accept a build that is not release-ready</label>
+          </div>
+          <div className="hint">
+            Off: mismatched configuration stops the upload before processing, and a build with
+            quality problems finishes as failed (its outputs stay downloadable). On: the build
+            finishes as completed and the problems are listed in the manifest.
+          </div>
+
+          {settings.ocr && !settings.ocr.ready && (
+            <div className="preflight warn">{settings.ocr.message}</div>
+          )}
+          {settings.storage_backend === "memory" && (
+            <div className="preflight">
+              Results are kept in server memory and are lost when the server stops. Download the
+              bundle when a job finishes, or set <code>STORAGE_BACKEND=local</code> to keep them on disk.
+            </div>
+          )}
 
           <button className="btn primary" style={{ width: "100%" }}
             disabled={busy || files.length === 0} onClick={submit}>
             {busy ? "Processing…" : `Process ${files.length || ""} file(s)`}
           </button>
-          {error && <div className="formerror">{error}</div>}
+          {error && (
+            <div className="formerror">
+              {error.message || String(error)}
+              {error.errors && error.errors.length > 0 && (
+                <ul>
+                  {error.errors.map((item, index) => (
+                    item.check ? (
+                      <li key={item.check}>
+                        <b>{item.check.replace(/_/g, " ")}</b>: {item.count}
+                        {item.examples && item.examples.length > 0 && ` (${item.examples.slice(0, 5).join(", ")}${item.count > 5 ? ", …" : ""})`}
+                      </li>
+                    ) : (
+                      <li key={index}><b>{item.field || "request"}</b>: {item.message || JSON.stringify(item)}</li>
+                    )
+                  ))}
+                </ul>
+              )}
+            </div>
+          )}
         </div>
       </aside>
+      <RecentJobs onOpen={onOpenJob} />
     </div>
+  );
+}
+
+function RecentJobs({ onOpen }) {
+  const [jobs, setJobs] = useState(null);
+  const [typed, setTyped] = useState("");
+  useEffect(() => {
+    readJson("/console/jobs").then((data) => setJobs(data.jobs)).catch(() => setJobs([]));
+  }, []);
+  const when = (seconds) => new Date(seconds * 1000).toLocaleString();
+  return (
+    <section className="card recent">
+      <div className="card-head"><h2>Previous jobs</h2></div>
+      <div className="card-body">
+        <div className="openjob">
+          <input placeholder="Job ID" value={typed} maxLength={24}
+            onChange={(e) => setTyped(e.target.value.trim())}
+            onKeyDown={(e) => { if (e.key === "Enter" && typed) onOpen(typed); }} />
+          <button className="btn" disabled={!/^[0-9a-f]{24}$/.test(typed)} onClick={() => onOpen(typed)}>Open</button>
+        </div>
+        {jobs === null && <div className="hint">Loading…</div>}
+        {jobs && jobs.length === 0 && (
+          <div className="hint">No jobs on this server yet. Jobs started here appear in this list until the server stops (or permanently with STORAGE_BACKEND=local).</div>
+        )}
+        {jobs && jobs.length > 0 && (
+          <div className="joblist">
+            {jobs.map((item) => (
+              <button key={item.job_id} className="jobrow" onClick={() => onOpen(item.job_id)}>
+                <span className={"state " + item.state}>{item.state}</span>
+                <span className="nm">{item.corpus_name || "corpus"}</span>
+                <span className="meta">
+                  {item.release_ready === false && item.artifacts_available ? "not release-ready · " : ""}
+                  {when(item.created_at)}
+                </span>
+                <span className="id">{item.job_id}</span>
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
+    </section>
   );
 }
 
@@ -342,8 +500,10 @@ function StageSpine({ stages }) {
   );
 }
 
-function JobStatus({ job }) {
+function JobStatus({ job, jobId, bundleSize }) {
   if (!job) return null;
+  const finished = job.state === "completed" || job.state === "failed";
+  const reasons = job.quality_reasons || [];
   return (
     <div className="jobstatus">
       <div className="row">
@@ -353,28 +513,59 @@ function JobStatus({ job }) {
         <div className="track"><div className="fill" style={{ width: `${job.progress || 0}%` }} /></div>
         <span style={{ fontFamily: "var(--mono)" }}>{job.progress || 0}%</span>
         <span style={{ color: "var(--dim)" }}>{job.message}</span>
+        {finished && job.artifacts_available && (
+          <a className="btn primary download" href={`/v1/jobs/${jobId}/bundle`}>
+            Download bundle{bundleSize ? ` (${formatBytes(bundleSize)})` : ""}
+          </a>
+        )}
       </div>
-      {job.error && <div className="err">{job.error}</div>}
+      <div className="jobid">Job {jobId}</div>
+      {finished && job.artifacts_available && job.release_ready === false && (
+        <div className="outcome">
+          <b>Not release-ready.</b> Every output was kept and can be inspected and downloaded below.
+          {reasons.length > 0 && (
+            <div className="reasons">
+              {reasons.map((reason) => <span key={reason} className="reason">{reason}</span>)}
+            </div>
+          )}
+        </div>
+      )}
+      {job.error && !(job.error.startsWith("QualityGateFailed") && reasons.length) && (
+        <div className="err">{job.error}</div>
+      )}
     </div>
   );
 }
 
 function DocumentBar({ overview, activeDoc, onSelect, jobId }) {
+  const [query, setQuery] = useState("");
   if (!overview) return null;
+  const many = overview.documents.length > 30;
+  const needle = query.trim().toLowerCase();
+  const matches = many
+    ? overview.documents.filter((document) => !needle
+        || document.source.toLowerCase().includes(needle)
+        || document.doc_id.toLowerCase().includes(needle)).slice(0, 40)
+    : overview.documents;
+  const active = overview.documents.find((document) => document.doc_id === activeDoc);
   return (
     <div className="jobbar">
       <span className="label">
         {overview.corpus_name} &middot; {overview.documents.length} document(s)
       </span>
+      {many && (
+        <input className="docsearch" placeholder={active ? active.source : "Find a document"}
+          value={query} onChange={(e) => setQuery(e.target.value)} />
+      )}
       <div className="docs">
-        {overview.documents.map((document) => (
+        {matches.map((document) => (
           <button
             key={document.doc_id}
             className={"docchip" + (document.doc_id === activeDoc ? " on" : "")}
             title={`${document.source} · ${document.chunks} chunks`}
             onClick={() => onSelect(document.doc_id)}
           >
-            <span className="dot"></span>
+            <span className={"dot" + (document.degraded ? " degraded" : "")}></span>
             {document.source.length > 28 ? `${document.source.slice(0, 26)}…` : document.source}
           </button>
         ))}
@@ -471,6 +662,15 @@ function SpanMap({ chunks, selected, onSelect }) {
   );
 }
 
+const EDGE_FAMILIES = [
+  [/^(PAPER_HAS|SECTION_HAS|TABLE_HAS|FIGURE_HAS)/, "#3a4250", "outline"],
+  [/^CLAIM_SUPPORTED_BY/, "#b7791f", "evidence"],
+  [/CITES/, "#3b6ea5", "citation"],
+  [/(QUANTITY|UNIT|_KV|SYMBOL)/, "#7c5aa6", "values"],
+  [/VECTOR_POINT/, "#4b5563", "vector"],
+];
+const edgeFamily = (rel) => EDGE_FAMILIES.find(([pattern]) => pattern.test(rel || "")) || [null, "#3a4250", "other"];
+
 function SigmaGraph({ graph, selected, jobId }) {
   const container = useRef();
   const renderer = useRef();
@@ -479,42 +679,40 @@ function SigmaGraph({ graph, selected, jobId }) {
   const [hidden, setHidden] = useState(new Set());
 
   useEffect(() => {
-    if (!container.current || !graph) return undefined;
+    setHidden(new Set((graph && graph.default_hidden) || []));
+    setPicked(null);
+  }, [graph]);
+
+  useEffect(() => {
+    if (!container.current || !graph || graph.error) return undefined;
     const Graph = window.graphology;
     const SigmaCtor = window.Sigma && (window.Sigma.Sigma || window.Sigma);
     if (!Graph || !SigmaCtor) return undefined;
 
-    const model = new Graph();
-    const shown = graph.nodes.filter((node) => !hidden.has(node.type));
-    const ids = new Set(shown.map((node) => node.id));
-    shown.forEach((node, index) => {
-      const angle = (2 * Math.PI * index) / shown.length;
-      const radius = 1 + (node.degree || 0) * 0.04;
+    const model = new Graph({ multi: true });
+    graph.nodes.filter((node) => !hidden.has(node.type)).forEach((node) => {
       model.addNode(node.id, {
-        label: String(node.label).slice(0, 36),
-        size: Math.max(3, Math.min(14, 3 + (node.degree || 0))),
+        label: String(node.label || "").slice(0, 48),
+        size: node.type === "Paper" ? 12 : Math.max(2.5, Math.min(9, 2.5 + Math.sqrt(node.degree || 0))),
         color: nodeColor(node.type),
-        x: Math.cos(angle) * radius + Math.random() * 0.1,
-        y: Math.sin(angle) * radius + Math.random() * 0.1,
-        _type: node.type, _role: node.role, _text: node.text,
-        _pages: node.pages, _degree: node.degree,
+        x: node.x, y: -node.y,
+        _type: node.type, _role: node.role, _text: node.text, _label: node.label,
+        _pages: node.pages, _degree: node.degree, _chunk: node.chunk_id,
       });
     });
     graph.edges.forEach((edge, index) => {
-      if (ids.has(edge.source) && ids.has(edge.target)) {
-        try {
-          model.addEdgeWithKey(`e${index}`, edge.source, edge.target,
-            { size: 0.6, color: "#2b313b", _rel: edge.rel });
-        } catch (error) { /* parallel edge already present */ }
+      if (model.hasNode(edge.source) && model.hasNode(edge.target)) {
+        const [, color] = edgeFamily(edge.rel);
+        model.addEdgeWithKey(`e${index}`, edge.source, edge.target,
+          { size: 0.7, color, _rel: edge.rel });
       }
     });
-    relaxLayout(model);
 
     if (renderer.current) { renderer.current.kill(); renderer.current = null; }
     const sigma = new SigmaCtor(model, container.current, {
-      labelRenderedSizeThreshold: 8,
+      labelRenderedSizeThreshold: 4,
       labelColor: { color: "#9aa4b2" },
-      defaultEdgeColor: "#2b313b",
+      defaultEdgeColor: "#3a4250",
     });
     renderer.current = sigma;
     graphRef.current = model;
@@ -523,7 +721,7 @@ function SigmaGraph({ graph, selected, jobId }) {
     sigma.on("clickNode", ({ node }) => {
       const attributes = model.getNodeAttributes(node);
       setPicked({
-        id: node, type: attributes._type, role: attributes._role,
+        id: node, type: attributes._type, role: attributes._role, label: attributes._label,
         text: attributes._text, pages: attributes._pages, degree: attributes._degree,
         neighbours: model.neighbors(node).map((other) => ({
           id: other,
@@ -531,6 +729,7 @@ function SigmaGraph({ graph, selected, jobId }) {
           label: model.getNodeAttribute(other, "label"),
           rel: model.edges(node, other).concat(model.edges(other, node))
             .map((key) => model.getEdgeAttribute(key, "_rel"))[0],
+          outgoing: model.edges(node, other).length > 0,
         })),
       });
     });
@@ -542,17 +741,23 @@ function SigmaGraph({ graph, selected, jobId }) {
   useEffect(() => {
     const model = graphRef.current;
     const sigma = renderer.current;
-    if (!model || !sigma || !selected) return;
+    if (!model || !sigma) return;
     let target = null;
-    model.forEachNode((node) => { if (node.endsWith(selected.chunk_id)) target = node; });
+    if (selected) {
+      model.forEachNode((node, attributes) => { if (attributes._chunk === selected.chunk_id) target = node; });
+    }
     const neighbourhood = new Set(target ? [target, ...model.neighbors(target)] : []);
     model.forEachNode((node) =>
       model.setNodeAttribute(node, "color",
-        target && !neighbourhood.has(node) ? "#2b313b" : nodeColor(model.getNodeAttribute(node, "_type"))));
+        target && !neighbourhood.has(node) ? "#262c36" : nodeColor(model.getNodeAttribute(node, "_type"))));
     sigma.refresh();
-  }, [selected]);
+  }, [selected, graph, hidden]);
 
-  const types = graph ? Object.keys(graph.all_types || {}).filter((t) => graph.nodes.some((n) => n.type === t)) : [];
+  if (graph && graph.error) return <div className="empty">Knowledge graph unavailable: {graph.error}</div>;
+  const counts = {};
+  ((graph && graph.nodes) || []).forEach((node) => { counts[node.type] = (counts[node.type] || 0) + 1; });
+  const types = Object.keys(counts).sort((a, b) => counts[b] - counts[a]);
+  const shown = ((graph && graph.nodes) || []).filter((node) => !hidden.has(node.type)).length;
 
   const exportPng = () => {
     const canvases = container.current.querySelectorAll("canvas");
@@ -565,7 +770,7 @@ function SigmaGraph({ graph, selected, jobId }) {
     canvases.forEach((canvas) => context.drawImage(canvas, 0, 0, output.width, output.height));
     const link = document.createElement("a");
     link.href = output.toDataURL("image/png");
-    link.download = "knowledge_graph.png";
+    link.download = `knowledge_graph_${graph.doc_id}.png`;
     link.click();
   };
 
@@ -575,19 +780,25 @@ function SigmaGraph({ graph, selected, jobId }) {
         {types.map((type) => (
           <span key={type} className={"lg" + (hidden.has(type) ? " off" : "")}
             style={{ color: nodeColor(type) }}
+            title={hidden.has(type) ? "Show this type" : "Hide this type"}
             onClick={() => setHidden((previous) => {
               const next = new Set(previous);
               if (next.has(type)) next.delete(type); else next.add(type);
               return next;
             })}>
-            <span className="swatch" style={{ background: nodeColor(type) }}></span>{type}
+            <span className="swatch" style={{ background: nodeColor(type) }}></span>{type} {counts[type]}
           </span>
         ))}
         <span style={{ marginLeft: "auto", display: "flex", gap: 6 }}>
           <button className="gbtn" onClick={exportPng}>Export PNG</button>
-          <a className="gbtn" href={`/v1/jobs/${jobId}/graph`}>JSON</a>
+          <a className="gbtn" href={`/v1/jobs/${jobId}/graph`}>Corpus JSON</a>
           <a className="gbtn" href={`/v1/jobs/${jobId}/graph/cypher`}>Cypher</a>
         </span>
+      </div>
+      <div className="legend edges">
+        {EDGE_FAMILIES.map(([, color, name]) => (
+          <span key={name} className="lg" style={{ color }}><span className="line" style={{ background: color }}></span>{name}</span>
+        ))}
       </div>
       <div id="sigma" ref={container}></div>
       {picked ? (
@@ -596,19 +807,23 @@ function SigmaGraph({ graph, selected, jobId }) {
             <span className="swatch" style={{ background: nodeColor(picked.type), width: 10, height: 10 }}></span>
             <b>{picked.type}</b>
             <span style={{ color: "var(--faint)", fontSize: 11, fontFamily: "var(--mono)", marginLeft: "auto" }}>
-              {picked.degree} connections
+              {picked.degree} connections{picked.pages ? ` · page ${picked.pages}` : ""}
             </span>
           </div>
-          <div style={{ fontFamily: "var(--mono)", fontSize: 11, color: "var(--dim)", margin: "6px 0" }}>{picked.id}</div>
-          {picked.text && <div style={{ fontSize: 12, color: "var(--dim)", marginBottom: 6 }}>{picked.text}</div>}
+          <div style={{ fontSize: 12, margin: "6px 0" }}>{picked.label}</div>
+          <div style={{ fontFamily: "var(--mono)", fontSize: 10, color: "var(--faint)", marginBottom: 6 }}>{picked.id}</div>
+          {picked.text && picked.text !== picked.label && (
+            <div style={{ fontSize: 12, color: "var(--dim)", marginBottom: 6 }}>{picked.text}</div>
+          )}
           {picked.neighbours && picked.neighbours.length > 0 && (
             <div style={{ display: "flex", flexDirection: "column", gap: 3, maxHeight: 150, overflow: "auto" }}>
-              {picked.neighbours.slice(0, 12).map((neighbour, index) => (
+              {picked.neighbours.slice(0, 20).map((neighbour, index) => (
                 <div key={index} style={{ fontSize: 11, fontFamily: "var(--mono)" }}>
-                  <span style={{ color: "var(--teal)" }}>{neighbour.rel || "—"}</span>
-                  {" → "}
+                  <span style={{ color: edgeFamily(neighbour.rel)[1] }}>
+                    {neighbour.outgoing ? "" : "← "}{neighbour.rel || "—"}{neighbour.outgoing ? " →" : ""}
+                  </span>{" "}
                   <span style={{ color: nodeColor(neighbour.type) }}>{neighbour.type}</span>{" "}
-                  <span style={{ color: "var(--dim)" }}>{String(neighbour.label).slice(0, 28)}</span>
+                  <span style={{ color: "var(--dim)" }}>{String(neighbour.label).slice(0, 40)}</span>
                 </div>
               ))}
             </div>
@@ -616,48 +831,17 @@ function SigmaGraph({ graph, selected, jobId }) {
         </div>
       ) : (
         <div className="caption">
-          {graph.n_nodes} nodes &middot; {graph.n_edges} edges &middot; click a node to inspect &middot; click a legend entry to hide a type
+          {graph ? (
+            <>
+              This document: {shown} of {graph.total_nodes} nodes shown{graph.truncated ? ` (largest ${graph.n_nodes} kept)` : ""}, {graph.n_edges} edges.
+              {graph.corpus && graph.corpus.nodes ? ` Whole corpus: ${graph.corpus.nodes.toLocaleString()} nodes, ${graph.corpus.edges.toLocaleString()} edges (download it to explore it in Neo4j or Gephi).` : ""}
+              {" "}The paper is at the centre; each ring is one level deeper in its outline. Click a node to inspect it, a legend entry to show or hide a type.
+            </>
+          ) : "Loading this document's graph…"}
         </div>
       )}
     </div>
   );
-}
-
-function relaxLayout(model) {
-  const nodes = model.nodes();
-  for (let iteration = 0; iteration < 120; iteration += 1) {
-    const strength = iteration < 60 ? 1 : 0.5;
-    nodes.forEach((a) => {
-      const ax = model.getNodeAttribute(a, "x");
-      const ay = model.getNodeAttribute(a, "y");
-      let fx = 0;
-      let fy = 0;
-      nodes.forEach((b) => {
-        if (a === b) return;
-        const dx = ax - model.getNodeAttribute(b, "x");
-        const dy = ay - model.getNodeAttribute(b, "y");
-        const repulsion = 0.006 / (dx * dx + dy * dy + 0.001);
-        fx += dx * repulsion;
-        fy += dy * repulsion;
-      });
-      fx += -ax * 0.02;
-      fy += -ay * 0.02;
-      model.setNodeAttribute(a, "x", ax + Math.max(-0.5, Math.min(0.5, fx * strength)));
-      model.setNodeAttribute(a, "y", ay + Math.max(-0.5, Math.min(0.5, fy * strength)));
-    });
-    model.forEachEdge((edge, attributes, source, target) => {
-      const sx = model.getNodeAttribute(source, "x");
-      const sy = model.getNodeAttribute(source, "y");
-      const tx = model.getNodeAttribute(target, "x");
-      const ty = model.getNodeAttribute(target, "y");
-      const dx = tx - sx;
-      const dy = ty - sy;
-      model.setNodeAttribute(source, "x", sx + dx * 0.01 * strength);
-      model.setNodeAttribute(source, "y", sy + dy * 0.01 * strength);
-      model.setNodeAttribute(target, "x", tx - dx * 0.01 * strength);
-      model.setNodeAttribute(target, "y", ty - dy * 0.01 * strength);
-    });
-  }
 }
 
 function EmbeddingMap({ jobId, selected, onSelect }) {
@@ -767,29 +951,40 @@ function ArtifactPanel({ artifacts, jobId }) {
     ["knowledge_graph/knowledge_graph.json", "nodes and edges"],
     ["knowledge_graph/knowledge_graph.cypher", "Neo4j or Memgraph import"],
     ["knowledge_graph/knowledge_graph.graphml", "Gephi or yEd"],
+    ["index/dense.npy", "dense vectors as a float32 matrix"],
+    ["index/metadata.json", "embedding model, dimension, and query settings"],
     ["corpus/chunks.json", "every chunk in the corpus"],
-    ["manifest.json", "job manifest and document inventory"],
+    ["manifest.json", "job manifest, quality report, and document inventory"],
   ];
-  const available = new Set((artifacts || []).map((item) => item.path));
+  const items = (artifacts && artifacts.artifacts) || [];
+  const sizes = Object.fromEntries(items.map((item) => [item.path, item.size_bytes]));
+  const groups = (artifacts && artifacts.artifact_groups) || [];
   return (
     <>
       <h2 style={{ marginTop: 10 }}>Portable artifacts</h2>
       <div className="dl">
-        {featured.filter(([path]) => available.has(path)).map(([path, description]) => (
+        {featured.filter(([path]) => path in sizes).map(([path, description]) => (
           <div className="item" key={path}>
             <span className="nm">{path.split("/").pop()}</span>
-            <span className="ds">{description}</span>
+            <span className="ds">{description} &middot; {formatBytes(sizes[path])}</span>
             <a className="get" href={`/v1/jobs/${jobId}/artifacts/download?path=${encodeURIComponent(path)}`}>
               download
             </a>
           </div>
         ))}
-        <div className="item">
-          <span className="nm">bundle.zip</span>
-          <span className="ds">every artifact in one archive</span>
-          <a className="get" href={`/v1/jobs/${jobId}/bundle`}>download</a>
-        </div>
+        {artifacts && artifacts.bundle && (
+          <div className="item">
+            <span className="nm">bundle.zip</span>
+            <span className="ds">every artifact in one archive &middot; {formatBytes(artifacts.bundle_size_bytes || 0)}</span>
+            <a className="get" href={artifacts.bundle}>download</a>
+          </div>
+        )}
       </div>
+      {groups.length > 0 && (
+        <div className="hint" style={{ margin: "6px 0 12px" }}>
+          {groups.map((group) => `${group.name}: ${group.count.toLocaleString()} file(s), ${formatBytes(group.size_bytes)}`).join(" · ")}
+        </div>
+      )}
       <h2>Load into your stack</h2>
       <div className="tabs">
         {Object.keys(SNIPPETS).map((name) => (
@@ -859,7 +1054,7 @@ function Workbench({ jobId, overview, activeDoc, chunks, elements, page, setPage
           <div style={{ marginLeft: "auto", display: "flex", gap: 4 }}>
             {["source", "chunks", "graph", "embedding"].map((name) => (
               <span key={name} className={"tab" + (view === name ? " on" : "")} onClick={() => setView(name)}>
-                {name === "graph" && graph ? `graph (${graph.n_nodes})` : name}
+                {name === "graph" && graph && !graph.error ? `graph (${graph.n_nodes})` : name}
               </span>
             ))}
           </div>
@@ -1189,10 +1384,10 @@ function App() {
   const [artifacts, setArtifacts] = useState(null);
 
   useEffect(() => {
-    Promise.all([readJson("/console/settings"), readJson("/v1/health").catch(() => ({}))])
-      .then(([console, health]) =>
-        setSettings({ ...console, embedders: health.embedders || ["hash"] }))
-      .catch(() => setSettings({ embedders: ["hash"], stages: STAGES }));
+    const fallback = [{ spec: "hash", label: "Hashing (ASCII words)", kind: "lexical", available: true }];
+    readJson("/console/settings")
+      .then((loaded) => setSettings({ ...loaded, embedders: loaded.embedders || fallback }))
+      .catch(() => setSettings({ embedders: fallback, stages: STAGES, version: "" }));
   }, []);
 
   useEffect(() => {
@@ -1216,17 +1411,17 @@ function App() {
         throw new Error("document configuration must be an object");
       }
     } catch (error) {
-      setFormError(error.message);
+      setFormError({ message: error.message });
       return;
     }
 
     const archives = form.files.filter((file) => file.name.toLowerCase().endsWith(".zip"));
     if (archives.length && form.files.length !== 1) {
-      setFormError("Upload one ZIP by itself, or upload documents without a ZIP.");
+      setFormError({ message: "Upload one ZIP by itself, or upload documents without a ZIP." });
       return;
     }
     if (form.useVlm && !form.apiKey && !settings.vlm_api_key_configured) {
-      setFormError("Enter an Anthropic API key, set ANTHROPIC_API_KEY in the .env file, or turn off figure description.");
+      setFormError({ message: "Enter an Anthropic API key, set ANTHROPIC_API_KEY in the .env file, or turn off figure description." });
       return;
     }
 
@@ -1235,6 +1430,8 @@ function App() {
     body.append("corpus_name", form.corpusName.trim() || "corpus");
     body.append("metadata", JSON.stringify(metadata));
     body.append("document_config", JSON.stringify(documentConfig));
+    body.append("require_bibliographic", form.requireBibliographic ? "true" : "false");
+    body.append("allow_degraded", form.allowDegraded ? "true" : "false");
     body.append("embedder", form.embedder);
     body.append("enable_vlm", form.useVlm ? "true" : "false");
     if (form.vlmModel) body.append("vlm_model", form.vlmModel);
@@ -1247,15 +1444,28 @@ function App() {
     try {
       const response = await fetch("/v1/jobs", { method: "POST", body, headers });
       const payload = await response.json();
-      if (!response.ok) throw new Error(payload.detail || `Upload failed (HTTP ${response.status})`);
+      if (!response.ok) {
+        setFormError({ message: payload.detail || `Upload failed (HTTP ${response.status})`,
+                       errors: payload.errors || [] });
+        setBusy(false);
+        return;
+      }
       setJobId(payload.job_id);
       setJob({ ...payload, progress: 0, stages: [], message: "Job accepted" });
       watch(payload.job_id);
     } catch (error) {
-      setFormError(error.message);
+      setFormError({ message: error.message });
       setBusy(false);
     } finally {
       form.clearKey();
+    }
+  };
+
+  const finish = (id, state) => {
+    // a failed job still publishes what it produced (quality gate, or a
+    // partial build): show it instead of an empty page
+    if (state.state === "completed" || (state.state === "failed" && state.artifacts_available)) {
+      loadResults(id);
     }
   };
 
@@ -1264,26 +1474,63 @@ function App() {
     source.addEventListener("job", (event) => {
       const state = JSON.parse(event.data);
       setJob(state);
-      if (state.state === "completed") { source.close(); setBusy(false); loadResults(id); }
-      if (state.state === "failed") { source.close(); setBusy(false); }
+      if (state.state === "completed" || state.state === "failed") {
+        source.close(); setBusy(false); finish(id, state);
+      }
     });
     source.addEventListener("error", () => { source.close(); setBusy(false); });
   };
+
+  const openJob = async (id) => {
+    setFormError(null);
+    try {
+      const state = await readJson(`/console/jobs/${id}`);
+      resetResults();
+      setJobId(id);
+      setJob(state);
+      setMode("inspect");
+      if (state.state === "queued" || state.state === "processing") {
+        setBusy(true);
+        watch(id);
+      } else {
+        finish(id, state);
+      }
+    } catch (error) {
+      setFormError({ message: `Could not open job ${id}: ${error.message}` });
+      window.history.replaceState(null, "", window.location.pathname);
+    }
+  };
+
+  // the job id lives in the address (#job/<id>), so a reload reopens the job
+  useEffect(() => {
+    const match = /^#job\/([0-9a-f]{24})$/.exec(window.location.hash);
+    if (settings && match && !jobId) openJob(match[1]);
+  }, [settings]);
+
+  useEffect(() => {
+    if (!settings) return;
+    const target = jobId ? `#job/${jobId}` : "";
+    if (window.location.hash !== target) {
+      window.history.replaceState(null, "", window.location.pathname + target);
+    }
+  }, [jobId, settings]);
 
   const loadResults = async (id) => {
     try {
       const documents = await readJson(`/console/jobs/${id}/documents`);
       setOverview(documents);
-      readJson(`/console/jobs/${id}/artifacts`).then((a) => setArtifacts(a.artifacts)).catch(() => {});
-      readJson(`/console/jobs/${id}/graph`).then(setGraph).catch(() => {});
+      readJson(`/console/jobs/${id}/artifacts`).then(setArtifacts).catch(() => {});
       if (documents.documents.length) selectDocument(id, documents.documents[0].doc_id);
     } catch (error) {
-      setFormError(error.message);
+      setFormError({ message: error.message });
     }
   };
 
   const selectDocument = async (id, docId) => {
     setActiveDoc(docId); setSelected(null); setHighlighted([]); setElements({}); setPage(1);
+    setGraph(null);
+    readJson(`/console/jobs/${id}/graph?doc_id=${encodeURIComponent(docId)}`)
+      .then(setGraph).catch((error) => setGraph({ error: error.message }));
     const document = await readJson(`/console/jobs/${id}/documents/${docId}/chunks`);
     setChunks(document.chunks || []);
     loadPage(id, docId, 1);
@@ -1311,7 +1558,7 @@ function App() {
   const header = (
     <header>
       <h1>CorpusRetrieve</h1>
-      <span className="tag">v{settings.version || "1.0.0"}</span>
+      <span className="tag">v{settings.version}</span>
       <span className="sub">Documents in &middot; portable chunks, vectors, and a knowledge graph out</span>
       <div className="toolbar">
         {overview && (
@@ -1338,7 +1585,8 @@ function App() {
     return (
       <div className="app">
         {header}
-        <SetupPanel settings={settings} onSubmit={submit} busy={busy} error={formError} />
+        <SetupPanel settings={settings} onSubmit={submit} busy={busy} error={formError}
+          onOpenJob={openJob} />
       </div>
     );
   }
@@ -1369,7 +1617,7 @@ function App() {
           onSelect={(docId) => selectDocument(jobId, docId)} />
       )}
       <StageSpine stages={(job && job.stages) || []} />
-      <JobStatus job={job} />
+      <JobStatus job={job} jobId={jobId} bundleSize={artifacts && artifacts.bundle_size_bytes} />
       {overview ? (
         <Workbench
           jobId={jobId} overview={overview} activeDoc={activeDoc} chunks={chunks}
@@ -1380,7 +1628,9 @@ function App() {
       ) : (
         <div className="empty">
           {job && job.state === "failed"
-            ? "The job failed. See the message above."
+            ? (job.artifacts_available
+                ? "Loading the outputs this job produced…"
+                : "The job failed before it produced any output. The message above says why.")
             : "Processing the corpus… results appear here when every stage completes."}
         </div>
       )}

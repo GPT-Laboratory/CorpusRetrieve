@@ -1,56 +1,106 @@
 # Changelog
 
-## 1.0.0
+## 2.0.0
 
-First unified release. The production integration API and the interactive web
-workbench, previously separate lines of development, are merged into one
-deployable project.
+The 2.0.0 release replaces 1.0.x. The REST API path stays `/v1`; the bundle,
+index, payload and manifest schemas are `2.0.0`. Rebuild corpora from their
+source files: 1.0.x bundles are not converted in place.
 
-### Added
+### Running long builds
 
-- Six-stage pipeline tracking. `extract`, `enrich`, `chunk`, `embed`, `graph`,
-  and `package` each report status, elapsed time, and counters. Exposed in
-  `stages[]` on the job status endpoint and the event stream.
-- Interactive web interface with Inspect, Explain, and Learn modes: provenance
-  overlay on rendered pages, typed-chunk span map, knowledge-graph explorer, and
-  2D embedding map.
-- Anthropic API key input in the web interface, sent per request as
-  `X-Anthropic-API-Key`, with a show/hide toggle and an indicator showing
-  whether a service key is already configured.
-- `.env` support for `ANTHROPIC_API_KEY` and every other setting, loaded at
-  startup and passed to the API and worker containers.
-- Page preview rendering for PDF documents, published as ordinary artifacts and
-  controlled by `EMIT_PAGE_PREVIEWS`, `PAGE_PREVIEW_DPI`, and
-  `MAX_PAGE_PREVIEWS_PER_DOCUMENT`.
-- Read-only `/console` layer serving browser view models, excluded from the
-  OpenAPI document and disableable with `CONSOLE_ENABLED`.
-- 2D projection of chunk embeddings using an SVD-based PCA on NumPy, with UMAP
-  used when it is installed.
-- `tools/api_smoke_test.py`, which exercises health, capabilities, upload,
-  polling, the event stream, every typed output, and the bundle download.
-- Test suite covering the endpoint contract, upload validation, archive safety,
-  credential handling, stage tracking, console view models, and projection.
-- `Makefile`, `requirements-dev.txt`, and expanded documentation under `docs/`.
+- `STORAGE_BACKEND=local` keeps artifacts and job status on disk under
+  `LOCAL_DATA_DIR`. Results survive a server restart and large outputs are not
+  held in memory. Jobs that were running when the server stopped are marked
+  "interrupted" instead of appearing to run forever.
+- Problems that guarantee a failed quality gate are reported at upload, before
+  any processing: `document_config` keys that match no file, files without a
+  configuration entry (when a configuration is given), and file names that
+  differ only in letter case. The upload is rejected with HTTP 422
+  `intake-check-failed`, listing the files, unless `allow_degraded=true`.
+- Each upload is checked for Tesseract and its language data; a problem is
+  reported as a warning before the build starts. `TESSERACT_CMD` points at the
+  executable when it is not on `PATH` (the usual case on Windows).
+- Figure descriptions stop for the rest of a build at the first
+  authentication, permission, missing-model or billing error, or after
+  `VLM_MAX_CONSECUTIVE_FAILURES` failures in a row. The remaining figures are
+  counted as `figures_skipped_vlm_unavailable` instead of being sent. The
+  Anthropic SDK's own retries are turned off (CorpusRetrieve retries), each
+  request times out after `VLM_TIMEOUT_SECONDS`, and repeated errors become one
+  warning with a count.
+- A model-based embedder (`bge-m3`, `st:<model id>`) is loaded before
+  extraction starts, so a missing package or a misspelt model id stops the job
+  at once instead of after the documents are processed.
+- Extract, enrich and chunk each report their own processing time; each
+  document's timing is recorded in the manifest.
+- `corpusretrieve reindex` re-embeds a finished build (a bundle ZIP or an
+  output directory) with another embedder, rebuilds the graph and re-seals the
+  bundle, without extracting the documents again.
 
-### Changed
+### Web interface
 
-- The pipeline is decomposed into `progress`, `documents`, `previews`,
-  `indexing`, `knowledge_graph`, `packaging`, and `artifacts` modules
-  orchestrated by a thin processor, replacing a single monolithic module.
-- Job state carries stage records, so the interface renders server-reported
-  facts rather than a client-side animation.
-- Redis and boto3 are imported lazily by the store factories, so a
-  memory-backed development or test run installs neither.
-- Artifact grouping for the downloads panel moved into the console view layer.
-- Documentation rewritten around the merged project.
+- A job that fails its quality gate, or fails partway, shows everything it
+  produced: documents, chunks, provenance overlay, graph, embedding map, a
+  "not release-ready" notice with each reason, and the downloads.
+- A download button for the bundle, with its size, whenever outputs exist.
+- The job ID is kept in the address (`#job/<id>`); the start page lists
+  previous jobs and opens any job by ID.
+- The knowledge graph view shows one document at a time with a stable radial
+  layout of its outline, readable labels, every node type in the legend with
+  its count, edges coloured by kind, and chunk selection highlighting.
+- The embedding map samples the whole index evenly from `index/dense.npy`.
+- The download panel lists the corpus-level files with their sizes.
+- Large corpora: a searchable document picker, and per-request work that no
+  longer scales with the number of documents times the number of artifacts.
+- New controls: accept a build that is not release-ready; the strict
+  publication-metadata default follows `REQUIRE_BIBLIOGRAPHIC`; the embedder
+  list shows every built-in model and whether it is installed.
 
-### Removed
+### Embeddings
 
-- The filesystem-backed job service, which kept one directory per job and could
-  not be deployed across replicas.
-- The Qdrant-dependent evidence service and its retrieval, reranking, and graph
-  expansion modules. CorpusRetrieve produces portable artifacts; a retrieval
-  service consumes them.
-- Client-side batch orchestration. A multi-document upload is now one corpus
-  job, and the interface switches between documents within it.
-- Domain-specific wording and development commentary throughout the source.
+- Built-in choices: `hash` (hashing-v1, the default), `hash-v2` (Unicode word
+  features), `st:intfloat/multilingual-e5-small`,
+  `st:intfloat/multilingual-e5-base`, `bge-m3`, and any
+  `st:<sentence-transformers model id>`.
+- E5 models get their `passage:` and `query:` prefixes. Index metadata records
+  the full model id and the prefixes, and the reference consumer reloads the
+  same model for queries. BGE-M3 uses half precision only on a GPU.
+
+### Core pipeline
+
+- Stable source-derived element and chunk IDs, typed retrieval units, source
+  spans and bounding boxes in every payload, optional figure descriptions.
+- PDF, DOCX, XLSX, HTML and text processing; OCR and text-layer accounting.
+- Publication records from per-document configuration, a labelled DOI
+  fallback from the PDF, a strict mode and a multi-publication ambiguity check.
+- Dense and BM25 sparse indexing with a query-side encoder, `index/dense.npy`,
+  a portable reference consumer, and knowledge-graph exports (JSON, GraphML,
+  Cypher with labelled batches).
+- Manifest with a `quality` block and `release_ready`, artifact checksums,
+  `bundle.zip.sha256`, `corpusretrieve verify` and `corpusretrieve repair`.
+- Identical files are processed once and their records merged; resumable,
+  additive CLI builds; generic manifest-to-configuration and group tools.
+- Uploaded files are staged under short internal names, so long source file
+  names do not exceed the Windows path limit.
+
+### Security and deployment
+
+- Optional API keys (`API_KEYS`), no cross-origin callers unless configured.
+- `DEPLOYMENT_MODE=production` checks API keys, S3, RQ, CORS and the object
+  store secret on start-up.
+
+### Defaults kept for compatibility
+
+- `DEFAULT_EMBEDDER=hash` and `INDEX_INLINE_VECTORS=true`, so consumers of
+  1.0.x bundles keep working until they opt in to `hash-v2`, a semantic model,
+  or `dense.npy` only.
+
+### Known limits
+
+- Multi-column and multi-page table fidelity and reference-list coverage need
+  corpus-specific spot checks; checksums establish integrity, not accuracy.
+- The web interface has no API-key sign-in; use it on trusted networks or
+  behind a gateway that adds the key.
+- The corpus knowledge graph links papers only through shared units: citation
+  keys and entities are scoped to their document.
+- Bundles are not byte-identical across environments (timestamps, build
+  metadata).

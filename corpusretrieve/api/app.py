@@ -9,6 +9,7 @@ from fastapi.openapi.utils import get_openapi
 from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
+from corpusretrieve.api.auth import install_authentication
 from corpusretrieve.api.errors import install_error_handling
 from corpusretrieve.api.outputs import router as outputs_router
 from corpusretrieve.api.routes import router as service_router
@@ -54,12 +55,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         docs_url=None,
         redoc_url="/redoc",
     )
+    # registered before the request-id middleware so it runs inside it and
+    # 401 responses still carry X-Request-ID
+    install_authentication(app, settings)
     install_error_handling(app)
     app.add_middleware(
         CORSMiddleware,
         allow_origins=list(settings.cors_origins),
         allow_methods=["GET", "POST", "DELETE"],
-        allow_headers=["Content-Type", "X-Anthropic-API-Key", "X-Request-ID"],
+        allow_headers=["Content-Type", "X-Anthropic-API-Key", "X-Request-ID",
+                       "Authorization", "X-API-Key"],
         expose_headers=["Location", "Retry-After", "X-Request-ID"],
     )
 

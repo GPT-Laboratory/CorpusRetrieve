@@ -121,7 +121,7 @@ header .sub { color: var(--dim); font-size: 12px; }
 
 .field { margin-bottom: 14px; }
 .field label { display: block; color: var(--dim); font-size: 12px; margin-bottom: 5px; }
-.field input, .field select, .field textarea {
+.field input, .field select, .field textarea, .openjob input, .docsearch {
   width: 100%;
   border: 1px solid var(--border);
   border-radius: 8px;
@@ -466,3 +466,45 @@ header .sub { color: var(--dim); font-size: 12px; }
 .sandbox-grid .sv { font-family: var(--mono); font-size: 20px; color: var(--teal); font-weight: 600; }
 .sandbox-grid .sl { font-size: 11px; color: var(--faint); margin-top: 2px; }
 .sandbox-bar { display: flex; gap: 2px; align-items: flex-end; height: 32px; margin-top: 6px; }
+
+/* ------------------------------------------------ outcome, preflight, jobs */
+
+.card-body > .hint { color: var(--faint); font-size: 11px; margin: -4px 0 12px; line-height: 1.5; }
+.hint code, .preflight code { font-family: var(--mono); font-size: 11px; color: var(--dim); }
+.preflight { font-size: 12px; line-height: 1.5; color: var(--dim); border: 1px solid var(--border);
+  border-radius: 10px; padding: 10px 12px; margin: 0 0 12px; }
+.preflight.warn { color: var(--amber); border-color: rgba(245, 158, 11, .45); }
+.formerror ul { margin: 6px 0 0; padding-left: 18px; }
+.formerror li { margin: 2px 0; }
+
+.recent { grid-column: 1 / -1; }
+.openjob { display: flex; gap: 8px; margin-bottom: 12px; }
+.openjob input { flex: 1; max-width: 260px; font-family: var(--mono); }
+.joblist { display: flex; flex-direction: column; gap: 4px; }
+.jobrow { display: grid; grid-template-columns: 90px minmax(0, 1fr) auto 210px; gap: 12px;
+  align-items: center; text-align: left; background: transparent; color: var(--ink);
+  border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; cursor: pointer; font: inherit; font-size: 12px; }
+.jobrow:hover, .jobrow:focus-visible { border-color: var(--teal); outline: none; }
+.jobrow .nm { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.jobrow .meta { color: var(--faint); }
+.jobrow .id { font-family: var(--mono); color: var(--faint); font-size: 11px; }
+.jobrow .state { font-family: var(--mono); font-size: 11px; }
+.jobrow .state.completed { color: var(--green); }
+.jobrow .state.failed { color: var(--rose); }
+.jobrow .state.processing, .jobrow .state.queued { color: var(--blue); }
+@media (max-width: 760px) { .jobrow { grid-template-columns: 80px minmax(0, 1fr); } .jobrow .meta, .jobrow .id { display: none; } }
+
+.jobstatus .download { padding: 5px 12px; font-size: 12px; text-decoration: none; white-space: nowrap; }
+.jobstatus .jobid { font-family: var(--mono); font-size: 11px; color: var(--faint); margin-top: 4px; user-select: all; }
+.jobstatus .outcome { margin-top: 8px; font-size: 12px; color: var(--amber); line-height: 1.5; }
+.jobstatus .outcome b { color: var(--amber); }
+.jobstatus .reasons { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+.jobstatus .reason { font-family: var(--mono); font-size: 11px; color: var(--ink); background: #0a0e14;
+  border: 1px solid rgba(245, 158, 11, .35); border-radius: 6px; padding: 2px 7px; }
+
+.docsearch { min-width: 220px; max-width: 320px; font-size: 12px; padding: 5px 9px; }
+.dot.degraded { background: var(--amber); }
+
+.legend.edges { padding-top: 0; }
+.legend.edges .lg { cursor: default; }
+.legend .line { display: inline-block; width: 14px; height: 2px; margin-right: 5px; vertical-align: middle; }

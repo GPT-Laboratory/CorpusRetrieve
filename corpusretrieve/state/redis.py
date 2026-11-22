@@ -49,3 +49,11 @@ class RedisJobStore:
 
     def delete(self, job_id: str) -> None:
         self.client.delete(self._spec_key(job_id), self._state_key(job_id))
+
+    def list_states(self, limit: int = 50) -> list[JobState]:
+        states = []
+        for key in self.client.scan_iter(match="corpusretrieve:job:*:state", count=500):
+            value = self.client.get(key)
+            if value:
+                states.append(JobState.from_dict(json.loads(value)))
+        return sorted(states, key=lambda s: s.created_at, reverse=True)[:limit]

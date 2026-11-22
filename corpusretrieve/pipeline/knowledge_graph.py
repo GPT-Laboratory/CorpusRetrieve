@@ -44,5 +44,10 @@ def build_graph(
         if on_progress is not None:
             on_progress(position)
 
-    graph.export(output_dir / GRAPH_DIRECTORY)
-    return {**summary, "artifacts": dict(GRAPH_ARTIFACTS)}
+    exported = graph.export(output_dir / GRAPH_DIRECTORY)
+    errors = exported.get("errors") or {}
+    artifacts = {k: v for k, v in GRAPH_ARTIFACTS.items() if k not in errors}
+    result = {**summary, "artifacts": artifacts}
+    if errors:
+        result["export_errors"] = errors      # recorded in the manifest quality block
+    return result

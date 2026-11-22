@@ -55,6 +55,10 @@ class StageTracker:
             if started is not None:
                 record.elapsed_ms = int((monotonic() - started) * 1000)
 
+    def set_elapsed(self, name: str, elapsed_ms: int) -> None:
+        """Record a stage's own processing time when it shares a loop with others."""
+        self._records[name].elapsed_ms = int(elapsed_ms)
+
     def fail(self, name: str, reason: str) -> None:
         record = self._records[name]
         record.status = "error"

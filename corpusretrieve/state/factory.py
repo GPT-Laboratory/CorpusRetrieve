@@ -19,4 +19,8 @@ def get_job_store() -> JobStore:
         from corpusretrieve.state.redis import RedisJobStore
 
         return RedisJobStore(settings)
+    if settings.storage_backend == "local":
+        from corpusretrieve.state.local import LocalJobStore
+
+        return LocalJobStore(settings)
     return MemoryJobStore()

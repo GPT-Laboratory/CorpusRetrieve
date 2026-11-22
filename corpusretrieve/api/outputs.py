@@ -16,7 +16,12 @@ from corpusretrieve.api.common import (
     manifest_data,
 )
 from corpusretrieve.api.errors import APIError
-from corpusretrieve.api.formats import SUPPORTED_FORMATS, available_embedders
+from corpusretrieve.api.formats import (
+    SUPPORTED_FORMATS,
+    available_embedders,
+    embedder_catalog,
+    ocr_preflight,
+)
 from corpusretrieve.api.schemas import (
     AssetList,
     CapabilitiesResponse,
@@ -77,6 +82,9 @@ def capabilities():
             "folder_upload": "Send folder files together or send one ZIP to /v1/jobs.",
         },
         "embedders": available_embedders(),
+        "embedder_catalog": embedder_catalog(),
+        "ocr": ocr_preflight(settings.ocr_langs),
+        "storage_backend": settings.storage_backend,
         "vlm": {
             "provider": "anthropic",
             "api_key_configured": bool(settings.anthropic_api_key),

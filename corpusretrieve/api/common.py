@@ -52,6 +52,12 @@ def job_status_payload(state: JobState) -> dict[str, Any]:
         "created_at": state.created_at,
         "updated_at": state.updated_at,
         "outputs_ready": state.state == "completed",
+        # a job that failed its quality gate (or partway) still publishes what
+        # it produced; clients use this to offer the results and downloads
+        "artifacts_available": bool(state.artifacts),
+        "release_ready": (state.quality or {}).get("release_ready"),
+        "quality_reasons": (state.quality or {}).get("reasons", []),
+        "corpus_name": state.corpus_name,
         "links": job_links(state.job_id),
     }
 

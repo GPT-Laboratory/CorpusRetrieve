@@ -14,3 +14,14 @@ api-test-output/
 data/
 tmp/
 *.log
+# Consumer-owned corpora and generated outputs (never vendor into the engine)
+external_data/
+source_documents/
+source_manifests/
+group_jobs/
+theme_jobs/
+outputs/
+indexes/
+*.pdf
+*.zip
+corpusretrieve-data/

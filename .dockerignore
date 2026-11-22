@@ -10,3 +10,12 @@ tests
 docs
 api-test-output
 *.zip
+.env*
+external_data
+source_documents
+source_manifests
+group_jobs
+theme_jobs
+outputs
+indexes
+*.pdf
