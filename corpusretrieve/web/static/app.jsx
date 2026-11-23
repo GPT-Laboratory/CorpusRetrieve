@@ -670,6 +670,9 @@ const EDGE_FAMILIES = [
   [/VECTOR_POINT/, "#4b5563", "vector"],
 ];
 const edgeFamily = (rel) => EDGE_FAMILIES.find(([pattern]) => pattern.test(rel || "")) || [null, "#3a4250", "other"];
+// cross-links are drawn on request, so the outline stays readable
+const DEFAULT_HIDDEN_EDGES = ["citation", "values", "vector"];
+const NODE_SIZE = { Paper: 12, Section: 7, Table: 4.5, Figure: 4.5, Claim: 3, Chunk: 2.5 };
 
 function SigmaGraph({ graph, selected, jobId }) {
   const container = useRef();
@@ -677,6 +680,7 @@ function SigmaGraph({ graph, selected, jobId }) {
   const graphRef = useRef();
   const [picked, setPicked] = useState(null);
   const [hidden, setHidden] = useState(new Set());
+  const [hiddenEdges, setHiddenEdges] = useState(new Set(DEFAULT_HIDDEN_EDGES));
 
   useEffect(() => {
     setHidden(new Set((graph && graph.default_hidden) || []));
@@ -693,7 +697,7 @@ function SigmaGraph({ graph, selected, jobId }) {
     graph.nodes.filter((node) => !hidden.has(node.type)).forEach((node) => {
       model.addNode(node.id, {
         label: String(node.label || "").slice(0, 48),
-        size: node.type === "Paper" ? 12 : Math.max(2.5, Math.min(9, 2.5 + Math.sqrt(node.degree || 0))),
+        size: NODE_SIZE[node.type] || 2.5,
         color: nodeColor(node.type),
         x: node.x, y: -node.y,
         _type: node.type, _role: node.role, _text: node.text, _label: node.label,
@@ -701,8 +705,8 @@ function SigmaGraph({ graph, selected, jobId }) {
       });
     });
     graph.edges.forEach((edge, index) => {
-      if (model.hasNode(edge.source) && model.hasNode(edge.target)) {
-        const [, color] = edgeFamily(edge.rel);
+      const [, color, family] = edgeFamily(edge.rel);
+      if (!hiddenEdges.has(family) && model.hasNode(edge.source) && model.hasNode(edge.target)) {
         model.addEdgeWithKey(`e${index}`, edge.source, edge.target,
           { size: 0.7, color, _rel: edge.rel });
       }
@@ -710,7 +714,8 @@ function SigmaGraph({ graph, selected, jobId }) {
 
     if (renderer.current) { renderer.current.kill(); renderer.current = null; }
     const sigma = new SigmaCtor(model, container.current, {
-      labelRenderedSizeThreshold: 4,
+      // only the paper and its sections are labelled; hover or click for the rest
+      labelRenderedSizeThreshold: 6,
       labelColor: { color: "#9aa4b2" },
       defaultEdgeColor: "#3a4250",
     });
@@ -736,7 +741,7 @@ function SigmaGraph({ graph, selected, jobId }) {
     sigma.on("clickStage", () => setPicked(null));
 
     return () => { if (renderer.current) { renderer.current.kill(); renderer.current = null; } };
-  }, [graph, hidden]);
+  }, [graph, hidden, hiddenEdges]);
 
   useEffect(() => {
     const model = graphRef.current;
@@ -751,7 +756,7 @@ function SigmaGraph({ graph, selected, jobId }) {
       model.setNodeAttribute(node, "color",
         target && !neighbourhood.has(node) ? "#262c36" : nodeColor(model.getNodeAttribute(node, "_type"))));
     sigma.refresh();
-  }, [selected, graph, hidden]);
+  }, [selected, graph, hidden, hiddenEdges]);
 
   if (graph && graph.error) return <div className="empty">Knowledge graph unavailable: {graph.error}</div>;
   const counts = {};
@@ -797,7 +802,15 @@ function SigmaGraph({ graph, selected, jobId }) {
       </div>
       <div className="legend edges">
         {EDGE_FAMILIES.map(([, color, name]) => (
-          <span key={name} className="lg" style={{ color }}><span className="line" style={{ background: color }}></span>{name}</span>
+          <span key={name} className={"lg" + (hiddenEdges.has(name) ? " off" : "")} style={{ color }}
+            title={hiddenEdges.has(name) ? "Show these links" : "Hide these links"}
+            onClick={() => setHiddenEdges((previous) => {
+              const next = new Set(previous);
+              if (next.has(name)) next.delete(name); else next.add(name);
+              return next;
+            })}>
+            <span className="line" style={{ background: color }}></span>{name}
+          </span>
         ))}
       </div>
       <div id="sigma" ref={container}></div>
@@ -835,7 +848,7 @@ function SigmaGraph({ graph, selected, jobId }) {
             <>
               This document: {shown} of {graph.total_nodes} nodes shown{graph.truncated ? ` (largest ${graph.n_nodes} kept)` : ""}, {graph.n_edges} edges.
               {graph.corpus && graph.corpus.nodes ? ` Whole corpus: ${graph.corpus.nodes.toLocaleString()} nodes, ${graph.corpus.edges.toLocaleString()} edges (download it to explore it in Neo4j or Gephi).` : ""}
-              {" "}The paper is at the centre; each ring is one level deeper in its outline. Click a node to inspect it, a legend entry to show or hide a type.
+              {" "}The paper is at the centre; each ring is one level deeper in its outline. Click a node to inspect it, a legend entry to show or hide a node type or a kind of link (citations and values start hidden).
             </>
           ) : "Loading this document's graph…"}
         </div>
@@ -981,7 +994,7 @@ function ArtifactPanel({ artifacts, jobId }) {
         )}
       </div>
       {groups.length > 0 && (
-        <div className="hint" style={{ margin: "6px 0 12px" }}>
+        <div className="groups">
           {groups.map((group) => `${group.name}: ${group.count.toLocaleString()} file(s), ${formatBytes(group.size_bytes)}`).join(" · ")}
         </div>
       )}

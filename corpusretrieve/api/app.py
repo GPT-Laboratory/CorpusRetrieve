@@ -79,15 +79,30 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     return app
 
 
+class _RevalidatedStaticFiles(StaticFiles):
+    """Static files the browser must recheck before reusing.
+
+    Without a cache header, browsers reuse a cached copy of the interface for
+    days, so after an upgrade they keep running the old ``app.jsx``. With
+    ``no-cache`` they ask every time and get a cheap 304 when nothing changed.
+    """
+
+    def file_response(self, *args, **kwargs):
+        response = super().file_response(*args, **kwargs)
+        response.headers["Cache-Control"] = "no-cache"
+        return response
+
+
 def _mount_interface(app: FastAPI, settings: Settings) -> None:
     static_dir = settings.static_dir
-    app.mount("/static", StaticFiles(directory=static_dir), name="static")
+    app.mount("/static", _RevalidatedStaticFiles(directory=static_dir), name="static")
 
     if settings.console_enabled:
 
         @app.get("/", include_in_schema=False)
         def console_index():
-            return FileResponse(static_dir / "index.html")
+            return FileResponse(static_dir / "index.html",
+                                headers={"Cache-Control": "no-cache"})
 
     @app.get("/docs", include_in_schema=False)
     def swagger_docs():

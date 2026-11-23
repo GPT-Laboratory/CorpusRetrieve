@@ -4,7 +4,10 @@ from typing import Any
 
 MAX_ELEMENT_TEXT = 600
 MAX_NODE_TEXT = 280
-DEFAULT_HIDDEN_NODE_TYPES = ("VectorPoint", "Quantity", "Unit", "TableKV")
+# shown on request from the legend: a paper cites dozens of works and every
+# unit links to its vector, so drawing them by default hides the outline
+DEFAULT_HIDDEN_NODE_TYPES = ("VectorPoint", "Quantity", "Unit", "TableKV", "ReferenceWork",
+                             "Entity")
 
 
 def document_elements(
@@ -121,7 +124,15 @@ def document_graph(document: dict[str, Any], corpus_name: str, embed_model: str,
 
     edges = [{"source": a, "target": b, "rel": rel}
              for a, b, rel in graph.edges(keys=True) if a in kept and b in kept]
-    positions, depth = _radial_layout(f"paper:{doc_id}", kept, edges)
+    # lay out the outline only; nodes that start hidden (cited works, vector
+    # points, values) are placed beside the outline node they belong to, so
+    # they neither take up space on the rings nor move the outline when shown
+    ntype = {node: data.get("ntype") for node, data in graph.nodes(data=True)}
+    outline = {n for n in kept if ntype.get(n) not in DEFAULT_HIDDEN_NODE_TYPES}
+    positions, depth = _radial_layout(
+        f"paper:{doc_id}", outline,
+        [e for e in edges if e["source"] in outline and e["target"] in outline])
+    _place_satellites(kept - outline, edges, positions, depth)
     degree: dict[str, int] = {}
     for edge in edges:
         degree[edge["source"]] = degree.get(edge["source"], 0) + 1
@@ -216,6 +227,41 @@ def _radial_layout(root: str, nodes: set[str], edges: list[dict[str, Any]]
             stack.append((kid, cursor, share, level + 1))
             cursor += share
     return positions, depth
+
+
+def _place_satellites(nodes: set[str], edges: list[dict[str, Any]],
+                      positions: dict[str, tuple[float, float]],
+                      depth: dict[str, int]) -> None:
+    """Put each remaining node on a small circle around a node already placed."""
+    import math
+
+    anchor: dict[str, str] = {}
+    pending = sorted(nodes)
+    for _ in range(4):                       # values hang off quantities, etc.
+        for edge in edges:
+            for a, b in ((edge["source"], edge["target"]), (edge["target"], edge["source"])):
+                if a in nodes and a not in anchor and b in positions:
+                    anchor[a] = b
+        grouped: dict[str, list[str]] = {}
+        for node in pending:
+            if node in anchor and node not in positions:
+                grouped.setdefault(anchor[node], []).append(node)
+        for host, members in grouped.items():
+            hx, hy = positions[host]
+            scale = math.hypot(hx, hy) or 1.0
+            ox, oy = hx / scale, hy / scale           # outward from the centre
+            for index, node in enumerate(members):
+                angle = 2 * math.pi * index / max(len(members), 1)
+                radius = 0.35 + 0.02 * (index // 12)
+                positions[node] = (hx + 0.3 * ox + radius * math.cos(angle),
+                                   hy + 0.3 * oy + radius * math.sin(angle))
+                depth[node] = depth.get(host, 0) + 1
+    outer = max(depth.values(), default=0) + 1
+    rest = [n for n in pending if n not in positions]
+    for index, node in enumerate(rest):
+        angle = 2 * math.pi * index / max(len(rest), 1)
+        positions[node] = (outer * math.cos(angle), outer * math.sin(angle))
+        depth[node] = outer
 
 
 def _node_label(node_id: str, node: dict[str, Any]) -> str:

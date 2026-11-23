@@ -42,11 +42,16 @@ source files: 1.0.x bundles are not converted in place.
   produced: documents, chunks, provenance overlay, graph, embedding map, a
   "not release-ready" notice with each reason, and the downloads.
 - A download button for the bundle, with its size, whenever outputs exist.
+- The interface files are served with `Cache-Control: no-cache`, so a browser
+  picks up a new version at once instead of running a cached old one.
 - The job ID is kept in the address (`#job/<id>`); the start page lists
   previous jobs and opens any job by ID.
 - The knowledge graph view shows one document at a time with a stable radial
   layout of its outline, readable labels, every node type in the legend with
   its count, edges coloured by kind, and chunk selection highlighting.
+- Cited works, entities, values and vector points start hidden in the graph,
+  and citation, value and vector links can be toggled from the edge legend;
+  the drawing stays inside its panel.
 - The embedding map samples the whole index evenly from `index/dense.npy`.
 - The download panel lists the corpus-level files with their sizes.
 - Large corpora: a searchable document picker, and per-request work that no

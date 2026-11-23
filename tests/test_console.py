@@ -109,3 +109,39 @@ def test_unknown_jobs_return_a_problem_document(client, job_id):
     response = client.get(f"/console/jobs/{job_id}/documents")
     assert response.status_code == 404
     assert response.headers["content-type"].startswith("application/problem+json")
+
+
+def test_interface_files_are_revalidated_after_an_upgrade(client):
+    for path in ("/", "/static/app.jsx", "/static/styles.css"):
+        response = client.get(path)
+        assert response.status_code == 200
+        assert response.headers["cache-control"] == "no-cache"
+
+
+def test_a_job_that_fails_partway_still_shows_and_downloads_its_outputs(
+        client, text_document, monkeypatch):
+    """A crash after the documents are processed must not hide them."""
+    import corpusretrieve.pipeline.processor as processor
+
+    def broken_index(*args, **kwargs):
+        raise RuntimeError("simulated failure while embedding")
+
+    monkeypatch.setattr(processor, "build_index", broken_index)
+    with text_document.open("rb") as handle:
+        job = client.post("/v1/jobs", files={"files": (text_document.name, handle,
+                                                        "text/plain")}).json()["job_id"]
+    status = client.get(f"/v1/jobs/{job}").json()
+    assert status["state"] == "failed" and "simulated failure" in status["error"]
+    assert status["artifacts_available"] is True and status["release_ready"] is False
+
+    overview = client.get(f"/console/jobs/{job}/documents").json()
+    assert overview["complete"] is False and overview["documents"]
+    doc_id = overview["documents"][0]["doc_id"]
+    chunks = client.get(f"/console/jobs/{job}/documents/{doc_id}/chunks").json()
+    assert chunks["chunks"]
+    graph = client.get(f"/console/jobs/{job}/graph", params={"doc_id": doc_id}).json()
+    assert graph["nodes"]
+    artifacts = client.get(f"/console/jobs/{job}/artifacts").json()
+    assert artifacts["bundle"] == f"/v1/jobs/{job}/bundle"
+    bundle = client.get(f"/v1/jobs/{job}/bundle")
+    assert bundle.status_code == 200 and bundle.content[:2] == b"PK"
